@@ -1,0 +1,14 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0
+torchaudio
+xformers
+bitsandbytes
+accelerate
+triton-windows
+diffusers
+transformers
+sentencepiece
+safetensors
+controlnet_aux
+gradio
+protobuf
