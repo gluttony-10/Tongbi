@@ -12,3 +12,4 @@ safetensors
 controlnet_aux
 gradio
 protobuf
+gguf

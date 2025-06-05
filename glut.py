@@ -2,11 +2,16 @@ import gradio as gr
 import numpy as np
 import random
 import torch
-from diffusers import  FluxPipeline, AutoencoderTiny, AutoencoderKL, FluxTransformer2DModel
+from diffusers import  FluxPipeline, AutoencoderTiny, AutoencoderKL, FluxTransformer2DModel 
 from transformers import T5EncoderModel, BitsAndBytesConfig
 
 import argparse
 from typing import Any, Dict, List, Optional, Union
+import os
+from glob import glob
+import psutil
+import time
+from para_attn.first_block_cache.diffusers_adapters import apply_cache_on_pipe
 
 
 parser = argparse.ArgumentParser() 
@@ -22,6 +27,8 @@ if torch.cuda.is_available():
     print(f'\033[32m显卡型号：{torch.cuda.get_device_name()}\033[0m')
     total_vram_in_gb = torch.cuda.get_device_properties(0).total_memory / 1073741824
     print(f'\033[32m显存大小：{total_vram_in_gb:.2f}GB\033[0m')
+    mem = psutil.virtual_memory()
+    print(f'\033[32m内存大小：{mem.total/1073741824:.2f}GB\033[0m')
     if torch.cuda.get_device_capability()[0] >= 8:
         print(f'\033[32m支持BF16\033[0m')
         dtype = torch.bfloat16
@@ -32,42 +39,15 @@ else:
     print(f'\033[32mCUDA不可用，启用CPU模式\033[0m')
     device = "cpu"
 
-
-quantization_config = BitsAndBytesConfig(
-    load_in_8bit=True,
-)
-
-taef1 = AutoencoderTiny.from_pretrained("madebyollin/taef1", torch_dtype=dtype)
-good_vae = AutoencoderKL.from_pretrained("models/FLUX.1-dev", subfolder="vae", torch_dtype=dtype).to(device)
-transformer = FluxTransformer2DModel.from_pretrained(
-    "models/FLUX.1-dev", 
-    subfolder="transformer",
-    quantization_config=quantization_config,
-    torch_dtype=dtype
-)
-text_encoder_2 = T5EncoderModel.from_pretrained(
-    "models/FLUX.1-dev", 
-    subfolder="text_encoder_2",
-    quantization_config=quantization_config,
-    torch_dtype=dtype
-)
-pipe = FluxPipeline.from_pretrained(
-    "models/FLUX.1-dev", 
-    transformer=transformer,
-    text_encoder_2=text_encoder_2,
-    vae=taef1,
-    torch_dtype=dtype, 
-    ).to(device)
-
 MAX_SEED = np.iinfo(np.int32).max
 MAX_IMAGE_SIZE = 2048
 
 
-def infer(prompt, seed=42, randomize_seed=False, width=1024, height=1024, guidance_scale=3.5, num_inference_steps=28, progress=gr.Progress(track_tqdm=True)):
+def infer(prompt, seed=42, randomize_seed=False, width=1024, height=1024, guidance_scale=3.5, num_inference_steps=28):
+    start_time = time.time()
     if randomize_seed:
         seed = random.randint(0, MAX_SEED)
     generator = torch.Generator().manual_seed(seed)
-    
     for img in pipe.flux_pipe_call_that_returns_an_iterable_of_images(
             prompt=prompt,
             guidance_scale=guidance_scale,
@@ -79,8 +59,8 @@ def infer(prompt, seed=42, randomize_seed=False, width=1024, height=1024, guidan
             good_vae=good_vae,
         ):
             yield img, seed
-    
-    print(f"seed: {seed}")
+    total_time = time.time() - start_time
+    print(f"生成完毕，种子数: {seed}，生成时间{total_time:.2f}秒")
 
 
 def calculate_shift(
@@ -247,15 +227,19 @@ def flux_pipe_call_that_returns_an_iterable_of_images(
     yield self.image_processor.postprocess(image, output_type=output_type)[0]
 
 
-pipe.flux_pipe_call_that_returns_an_iterable_of_images = flux_pipe_call_that_returns_an_iterable_of_images.__get__(pipe)
-
 examples = [
     "a tiny astronaut hatching from an egg on the moon",
     "a cat holding a sign that says hello world",
     "an anime illustration of a wiener schnitzel",
 ]
 
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
+model_dirs = [os.path.basename(d) for d in glob('models/diffusers/*') if os.path.isdir(d)]
+model_dirs.sort()
+transformer_files = [os.path.basename(f) for f in glob('models/transformers/*') if os.path.isfile(f)]
+transformer_files.sort()
+transformer_files = ["默认"] + model_dirs + transformer_files
+
+with gr.Blocks() as demo:
     gr.Markdown("""
             <div>
                 <h2 style="font-size: 30px;text-align: center;">通臂 Tongbi</h2>
@@ -272,60 +256,63 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             """)
     with gr.Column():
         with gr.Row():
+            model_dir=gr.Dropdown(label="模型", choices=model_dirs, value=model_dirs[0] if model_dirs else None)
+            transformer_file=gr.Dropdown(label="transformer", choices=transformer_files, value=transformer_files[0] if transformer_files else None)
+        with gr.Tab("文生图"):
             with gr.Column():
-                prompt = gr.Textbox(
-                    label="提示词",
-                    placeholder="输入你的提示词",
+                with gr.Row():
+                    with gr.Column():
+                        prompt = gr.Textbox(
+                            label="提示词",
+                            placeholder="输入你的提示词",
+                        )
+                        run_button = gr.Button("开始生成", variant="primary")
+                        with gr.Accordion("高级设置"):
+                            seed = gr.Slider(
+                                label="Seed",
+                                minimum=0,
+                                maximum=MAX_SEED,
+                                step=1,
+                                value=0,
+                            )
+                            randomize_seed = gr.Checkbox(label="随机种子", value=True)
+                            with gr.Row(): 
+                                width = gr.Slider(
+                                    label="宽度",
+                                    minimum=256,
+                                    maximum=MAX_IMAGE_SIZE,
+                                    step=64,
+                                    value=1024,
+                                )
+                                height = gr.Slider(
+                                    label="高度",
+                                    minimum=256,
+                                    maximum=MAX_IMAGE_SIZE,
+                                    step=64,
+                                    value=1024,
+                                )
+                            with gr.Row():
+                                guidance_scale = gr.Slider(
+                                    label="引导强度",
+                                    minimum=1,
+                                    maximum=15,
+                                    step=0.1,
+                                    value=3.5,
+                                )
+                                num_inference_steps = gr.Slider(
+                                    label="推理步数",
+                                    minimum=1,
+                                    maximum=50,
+                                    step=1,
+                                    value=28,
+                                )
+                    result = gr.Image(label="生成图像", show_label=False)
+                gr.Examples(
+                    examples = examples,
+                    fn = infer,
+                    inputs = [prompt],
+                    outputs = [result, seed],
                 )
-                run_button = gr.Button("开始生成", variant="primary")
-                with gr.Accordion("高级设置"):
-                    seed = gr.Slider(
-                        label="Seed",
-                        minimum=0,
-                        maximum=MAX_SEED,
-                        step=1,
-                        value=0,
-                    )
-                    randomize_seed = gr.Checkbox(label="随机种子", value=True)
-                    with gr.Row(): 
-                        width = gr.Slider(
-                            label="宽度",
-                            minimum=256,
-                            maximum=MAX_IMAGE_SIZE,
-                            step=64,
-                            value=1024,
-                        )
-                        height = gr.Slider(
-                            label="高度",
-                            minimum=256,
-                            maximum=MAX_IMAGE_SIZE,
-                            step=64,
-                            value=1024,
-                        )
-                    with gr.Row():
-                        guidance_scale = gr.Slider(
-                            label="引导强度",
-                            minimum=1,
-                            maximum=15,
-                            step=0.1,
-                            value=3.5,
-                        )
-                        num_inference_steps = gr.Slider(
-                            label="推理步数",
-                            minimum=1,
-                            maximum=50,
-                            step=1,
-                            value=28,
-                        )
-            result = gr.Image(label="生成图像", show_label=False)
-
-        gr.Examples(
-            examples = examples,
-            fn = infer,
-            inputs = [prompt],
-            outputs = [result, seed],
-            cache_examples="lazy"
-        )
 
     gr.on(
         triggers=[run_button.click, prompt.submit],
@@ -334,7 +321,41 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
         outputs = [result, seed]
     )
 
+def load_model():
+    global pipe, good_vae
+    quantization_config = BitsAndBytesConfig(load_in_8bit=True, torch_dtype=torch.float32)
+    taef1 = AutoencoderTiny.from_pretrained("madebyollin/taef1", torch_dtype=dtype)
+    transformer = FluxTransformer2DModel.from_pretrained(
+        f"models/diffusers/{model_dir.value}",
+        subfolder="transformer",
+        quantization_config=quantization_config,
+        torch_dtype=dtype,
+    )
+    text_encoder_2 = T5EncoderModel.from_pretrained(
+        f"models/diffusers/{model_dir.value}",
+        subfolder="text_encoder_2",
+        quantization_config=quantization_config,
+        torch_dtype=dtype,
+    )
+    good_vae = AutoencoderKL.from_pretrained(
+        f"models/diffusers/{model_dir.value}", 
+        subfolder="vae", 
+        quantization_config=quantization_config,
+        torch_dtype=dtype,
+    )
+    pipe = FluxPipeline.from_pretrained(
+        f"models/diffusers/{model_dir.value}",
+        transformer=transformer,
+        text_encoder_2=text_encoder_2,
+        vae=taef1,
+        torch_dtype=dtype, 
+    ).to(device)
+    pipe.enable_model_cpu_offload()
+    pipe.flux_pipe_call_that_returns_an_iterable_of_images = flux_pipe_call_that_returns_an_iterable_of_images.__get__(pipe)
+
+
 if __name__ == "__main__": 
+    load_model()
     demo.launch(
         server_name=args.server_name, 
         server_port=args.server_port,
