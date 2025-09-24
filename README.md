@@ -37,7 +37,7 @@ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/w
 ```
 ## 下载模型
 ```
-python download.py
+modelscope download --model Gluttony10/Tongbi --local_dir ./models
 ```
 ## 开始运行
 ```

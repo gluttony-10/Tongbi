@@ -1394,7 +1394,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                 info_con = gr.Textbox(label="提示信息", interactive=False)
                 image_output_con = gr.Gallery(label="生成结果", interactive=False)
                 stop_button_con = gr.Button("中止生成", variant="stop")
-    """with gr.TabItem("图像编辑"):
+    with gr.TabItem("图像编辑"):
         with gr.Row():
             with gr.Column():
                 image_edit = gr.Image(label="输入图片", type="pil", height=400, image_mode="RGBA")
@@ -1459,7 +1459,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
             with gr.Column():
                 info_editinp = gr.Textbox(label="提示信息", interactive=False)
                 image_output_editinp = gr.Gallery(label="生成结果", interactive=False)
-                stop_button_editinp = gr.Button("中止生成", variant="stop")"""
+                stop_button_editinp = gr.Button("中止生成", variant="stop")
     with gr.TabItem("单图编辑"):
         with gr.Row():
             with gr.Column():
