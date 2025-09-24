@@ -1,30 +1,21 @@
 from huggingface_hub import snapshot_download, login
 import os
 
-# 1. 检查是否已登录
-try:
-    # 尝试无需登录的下载（如果已缓存凭据）
+model_name="Gluttony10/Qwen-Image"
+folder_name = model_name.split('/')[-1]
+
+def download_model(model_name):
     snapshot_download(
-        repo_id="black-forest-labs/FLUX.1-dev",
-        local_dir="models/FLUX.1-dev",
+        repo_id=model_name,
+        local_dir=f"models",
         allow_patterns=[
-            "scheduler/*",
-            "text_encoder/*",
-            "tokenizer/*",
-            "tokenizer_2/*",
-            "vae/*",
-            "model_index.json"
+            "*",
         ],
-        resume_download=True
     )
-    print("FLUX.1-dev下载成功！")
-    
-    snapshot_download(
-        repo_id="city96/t5-v1_1-xxl-encoder-bf16",
-        local_dir="models/FLUX.1-dev/text_encoder_2",
-        resume_download=True
-    )
-    print("t5-v1_1-xxl-encoder-bf16下载成功！")
+    print("下载成功！")
+
+try:
+    download_model(model_name)
     
 except Exception as e:
     if "401" in str(e):
@@ -34,27 +25,7 @@ except Exception as e:
         
         # 登录并重试
         login(token=token)
-        snapshot_download(
-            repo_id="black-forest-labs/FLUX.1-dev",
-            local_dir="models/FLUX.1-dev",
-            allow_patterns=[
-                "scheduler/*",
-                "text_encoder/*",
-                "tokenizer/*",
-                "tokenizer_2/*",
-                "vae/*",
-                "model_index.json"
-            ],
-            resume_download=True
-        )
-        print("FLUX.1-dev下载成功！")
-        
-        snapshot_download(
-            repo_id="city96/t5-v1_1-xxl-encoder-bf16",
-            local_dir="models/FLUX.1-dev/text_encoder_2",
-            resume_download=True
-        )
-        print("t5-v1_1-xxl-encoder-bf16下载成功！")
+        download_model(model_name)
         
     else:
         print(f"下载失败: {str(e)}")
