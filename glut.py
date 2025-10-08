@@ -55,7 +55,6 @@ else:
 config = {}
 transformer_choices = []
 transformer_choices2 = []
-transformer_choices3 = []
 transformer_loaded = None
 lora_choices = []
 lora_loaded = None
@@ -78,8 +77,7 @@ if os.path.exists(CONFIG_FILE):
         config = json.load(f)
 #默认设置
 transformer_ = config.get("TRANSFORMER_DROPDOWN", "Qwen-Image-Lightning-8steps-V1.1-mmgp.safetensors")
-transformer_2 = config.get("TRANSFORMER_DROPDOWN2", "Qwen-Image-Edit-Lightning-8steps-V1.0-mmgp.safetensors")
-transformer_3 = config.get("TRANSFORMER_DROPDOWN3", "Qwen-Image-Edit-2509-Lightning-8steps-V1.0-mmgp.safetensors")
+transformer_2 = config.get("TRANSFORMER_DROPDOWN2", "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-mmgp.safetensors")
 max_vram = float(config.get("MAX_VRAM", "0.8"))
 openai_base_url = config.get("OPENAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
 openai_api_key = config.get("OPENAI_API_KEY", "")
@@ -90,15 +88,13 @@ max_tokens = float(config.get("MAX_TOKENS", "16384"))
 modelscope_api_key = config.get("MODELSCOPE_API_KEY", "")
 
 def refresh_model():
-    global transformer_choices, transformer_choices2,  transformer_choices3, lora_choices
+    global transformer_choices, transformer_choices2, lora_choices
     transformer_dir = "models/transformer"
     lora_dir = "models/lora"
     if os.path.exists(transformer_dir):
         transformer_files = [f for f in os.listdir(transformer_dir) if f.endswith(".safetensors")]
         transformer_choices = sorted([f for f in transformer_files] + ["ModelScope-QI.safetensors"])
         transformer_choices2 = sorted([f for f in transformer_files if "edit" in f or "Edit" in f])
-        #transformer_choices2 = sorted([f for f in transformer_files if "edit" in f or "Edit" in f] + ["ModelScope-QIE.safetensors"])
-        transformer_choices3 = sorted([f for f in transformer_files if "2509" in f])
     else:
         print("transformer文件夹不存在")
     if os.path.exists(lora_dir):
@@ -106,7 +102,7 @@ def refresh_model():
         lora_choices = sorted(lora_files)
     else:
         lora_choices = []
-    return gr.Dropdown(choices=transformer_choices), gr.Dropdown(choices=transformer_choices2), gr.Dropdown(choices=transformer_choices3), gr.Dropdown(choices=lora_choices)
+    return gr.Dropdown(choices=transformer_choices), gr.Dropdown(choices=transformer_choices2), gr.Dropdown(choices=lora_choices)
 
 refresh_model()
 
@@ -195,7 +191,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
         # 加载transformer
         #transformer = QwenImageTransformer2DModel.from_pretrained(model_id, subfolder="transformer", torch_dtype=dtype)
         #transformer = QwenImageTransformer2DModel.from_single_file("Real-Qwen-Image-V1.safetensors", config=f"{model_id}/transformer/config.json", torch_dtype=dtype)
-        #transformer = load_and_merge_lora_weight_from_safetensors(transformer, "Qwen-Image-Edit-Lightning-8steps-V1.0.safetensors")
+        #transformer = load_and_merge_lora_weight_from_safetensors(transformer, "Qwen-Image-Edit-2509-Lightning-8steps-V1.0-fp32.safetensors")
         if "mmgp" in transformer_dropdown:
             transformer = offload.fast_load_transformers_model(
                 f"models/transformer/{transformer_dropdown}",
@@ -218,9 +214,6 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
             "i2i": QwenImageImg2ImgPipeline,
             "inp": QwenImageInpaintPipeline,
             "con": QwenImageControlNetPipeline,
-            "edit": QwenImageEditPipeline,
-            "edit2": QwenImageEditPipeline,
-            "editinp":QwenImageEditInpaintPipeline,
             "editplus":QwenImageEditPlusPipeline,
         }.get(mode)
         if pipeline_class is None:
@@ -233,7 +226,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
                 torch_dtype=dtype,
             )
         elif mode == "con":
-            controlnet = QwenImageControlNetModel.from_pretrained("models/Qwen-Image-ControlNet-Union", torch_dtype=dtype)
+            controlnet = QwenImageControlNetModel.from_pretrained("models/Qwen-Image-ControlNet-Union", torch_dtype=dtype,)
             pipe = pipeline_class.from_pretrained(
                 model_id, 
                 controlnet=controlnet,
@@ -241,7 +234,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
                 scheduler=scheduler,
                 torch_dtype=dtype,
             )
-        if mode in ["edit", "edit2", "editplus"]:
+        if mode in ["editplus"]:
             pipe.set_progress_bar_config(disable=None)
         # 加载LoRA并配置显存
         load_lora(lora_dropdown, lora_weights)
@@ -257,7 +250,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
             budgets={'*': budgets}, 
             compile=True if args.compile else False,
         )
-        #offload.save_model(pipe.transformer, "models/transformer-mmgp.safetensors")
+        #offload.save_model(pipe.transformer, "models/transformer/mmgp.safetensors")
 
 
 def load_lora(lora_dropdown, lora_weights):
@@ -283,6 +276,13 @@ def load_lora(lora_dropdown, lora_weights):
 def enhance_prompt(prompt, image=None, retry_times=3):
     if isinstance(image, dict):
         image = image["background"]
+    elif isinstance(image, list):
+        if not isinstance(image[0], Image.Image):
+            image = Image.open(image[0])
+        else:
+            image = image[0]
+    elif isinstance(image, list):
+        image = Image.open(image[0])
     if openai_api_key == "":
         return prompt, "请在设置中，填写API相关信息并保存"
     try:
@@ -327,7 +327,7 @@ def enhance_prompt(prompt, image=None, retry_times=3):
                     max_tokens=max_tokens,
                 )
                 if response.choices:
-                    return response.choices[0].message.content.replace('"', '').replace('<|begin_of_box|>', '').replace('<|end_of_box|>', ''), "✅ 反推提示词完毕"
+                    return gr.update(value=response.choices[0].message.content.replace('"', '').replace('<|begin_of_box|>', '').replace('<|end_of_box|>', '')), "✅ 反推提示词完毕"
         else:
             for i in range(retry_times):
                 response = client.chat.completions.create(
@@ -381,14 +381,12 @@ def enhance_prompt(prompt, image=None, retry_times=3):
                     max_tokens=max_tokens,
                 )
                 if response.choices:
-                    return response.choices[0].message.content.replace('"', '').replace('<|begin_of_box|>', '').replace('<|end_of_box|>', ''), "✅ 提示词增强完毕"
+                    return gr.update(value=response.choices[0].message.content.replace('"', '').replace('<|begin_of_box|>', '').replace('<|end_of_box|>', '')), "✅ 提示词增强完毕"
     except Exception as e:
         return prompt, f"API调用异常：{str(e)}"
+    
 
-
-def enhance_prompt_edit(prompt, image=None, retry_times=3):
-    if isinstance(image, dict):
-        image = image["background"]
+def enhance_prompt_edit2(prompt, image_editplus2, image_editplus3, image_editplus4, image_editplus5, retry_times=3):
     if openai_api_key == "":
         return prompt, "请在设置中，填写API相关信息并保存"
     try:
@@ -397,10 +395,27 @@ def enhance_prompt_edit(prompt, image=None, retry_times=3):
             api_key = openai_api_key,
         )
         text = prompt.strip()
-        pil_img = image.convert("RGB")
-        img_byte_arr = io.BytesIO()
-        pil_img.save(img_byte_arr, format='PNG')
-        img_base = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+        image = [image_editplus2, image_editplus3, image_editplus4, image_editplus5]
+        image = [img for img in image if img is not None]
+        images = []
+        for img in image:
+            img = img.convert("RGBA")
+            white_bg = Image.new("RGB", img.size, (255, 255, 255))
+            white_bg.paste(img, mask=img.split()[3])
+            img_rgb = white_bg.convert("RGB")
+            img_byte_arr = io.BytesIO()
+            img_rgb.save(img_byte_arr, format='PNG')
+            img_base = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+            images.append(img_base)
+        multi_image_content = [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": url
+                }
+            }
+            for url in images
+        ]
         for i in range(retry_times):
             response = client.chat.completions.create(
                 messages=[{"role": "system", "content": """
@@ -454,15 +469,10 @@ def enhance_prompt_edit(prompt, image=None, retry_times=3):
                     "role": "user",
                     "content":  [
                         {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": img_base
-                            }
-                        },
-                        {
                             "type": "text",
                             "text": f"{text}",
-                        }
+                        },
+                        *multi_image_content  # 展开多图数组
                     ]
                 },
                 ],
@@ -473,112 +483,20 @@ def enhance_prompt_edit(prompt, image=None, retry_times=3):
                 max_tokens=max_tokens,
             )
             if response.choices:
-                return response.choices[0].message.content.replace('"', '').replace('<|begin_of_box|>', '').replace('<|end_of_box|>', ''), "✅ 反推提示词完毕"
+                return gr.update(value=response.choices[0].message.content.replace('"', '').replace('<|begin_of_box|>', '').replace('<|end_of_box|>', '')), "✅ 提示词增强完毕"
     except Exception as e:
         return prompt, f"API调用异常：{str(e)}"
     
 
-def enhance_prompt_edit2(prompt, image=None, image2=None, retry_times=3):
-    if isinstance(image, dict):
-        image = image["background"]
-    if openai_api_key == "":
-        return prompt, "请在设置中，填写API相关信息并保存"
-    try:
-        client = OpenAI(
-            base_url = openai_base_url,
-            api_key = openai_api_key,
-        )
-        text = prompt.strip()
-        pil_img = image.convert("RGB")
-        img_byte_arr = io.BytesIO()
-        pil_img.save(img_byte_arr, format='PNG')
-        img_base = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
-        pil_img2 = image2.convert("RGB")
-        img_byte_arr2 = io.BytesIO()
-        pil_img2.save(img_byte_arr2, format='PNG')
-        img_base2 = base64.b64encode(img_byte_arr2.getvalue()).decode('utf-8')
-        for i in range(retry_times):
-            response = client.chat.completions.create(
-                messages=[{"role": "system", "content": """
-#编辑指令重写器
-你是一名专业的编辑指令重写者。您的任务是根据用户提供的指令和要编辑的图像生成精确、简洁、视觉上可实现的专业级编辑指令。  
-请严格遵守以下重写规则：
-1.总则
--保持重写后的提示**简洁**。避免过长的句子，减少不必要的描述性语言。  
--如果指示是矛盾的、模糊的或无法实现的，优先考虑合理的推理和纠正，并在必要时补充细节。  
--保持原说明书的核心意图不变，只会增强其清晰度、合理性和视觉可行性。  
--所有添加的对象或修改必须与编辑后的输入图像的整体场景的逻辑和风格保持一致。  
-2.任务类型处理规则
-1.添加、删除、替换任务
--如果指令很明确（已经包括任务类型、目标实体、位置、数量、属性），请保留原始意图，只细化语法。  
--如果描述模糊，请补充最少但足够的细节（类别、颜色、大小、方向、位置等）。例如：
->原文：“添加动物”
->重写：“在右下角添加一只浅灰色的猫，坐着面对镜头”
--删除无意义的指令：例如，“添加0个对象”应被忽略或标记为无效。  
--对于替换任务，请指定“用X替换Y”，并简要描述X的主要视觉特征。
-2.文本编辑任务
--所有文本内容必须用英文双引号“”括起来。不要翻译或更改文本的原始语言，也不要更改大写字母。  
--**对于文本替换任务，请始终使用固定模板：**
--`将“xx”替换为“yy”`。  
--`将xx边界框替换为“yy”`。  
--如果用户没有指定文本内容，则根据指令和输入图像的上下文推断并添加简洁的文本。例如：
->原文：“添加一行文字”（海报）
->重写：在顶部中心添加文本“限量版”，并带有轻微阴影
--以简洁的方式指定文本位置、颜色和布局。  
-3.人工编辑任务
--保持人的核心视觉一致性（种族、性别、年龄、发型、表情、服装等）。  
--如果修改外观（如衣服、发型），请确保新元素与原始风格一致。  
--**对于表情变化，它们必须是自然和微妙的，永远不要夸张。**
--如果不特别强调删除，则应保留原始图像中最重要的主题（例如，人、动物）。
--对于背景更改任务，首先要强调保持主题的一致性。  
--示例：
->原文：“更换人的帽子”
->改写：“用深棕色贝雷帽代替男士的帽子；保持微笑、短发和灰色夹克不变”
-4.风格转换或增强任务
--如果指定了一种风格，请用关键的视觉特征简洁地描述它。例如：
->原创：“迪斯科风格”
->改写：“20世纪70年代的迪斯科：闪烁的灯光、迪斯科球、镜面墙、多彩的色调”
--如果指令说“使用参考风格”或“保持当前风格”，则分析输入图像，提取主要特征（颜色、构图、纹理、照明、艺术风格），并简洁地整合它们。  
--**对于着色任务，包括恢复旧照片，始终使用固定模板：**“恢复旧照片、去除划痕、减少噪音、增强细节、高分辨率、逼真、自然的肤色、清晰的面部特征、无失真、复古照片恢复”
--如果还有其他更改，请将样式描述放在末尾。
-3.合理性和逻辑检查
--解决相互矛盾的指示：例如，“删除所有树但保留所有树”应在逻辑上得到纠正。  
--添加缺失的关键信息：如果位置未指定，请根据构图选择合理的区域（靠近主体、空白、中心/边缘）。  
-"""
-                },
-                {
-                    "role": "user",
-                    "content":  [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": img_base
-                            }
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": img_base2
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": f"{text}",
-                        }
-                    ]
-                },
-                ],
-                model=model_name,
-                temperature=temperature,
-                top_p=top_p,
-                stream=False,
-                max_tokens=max_tokens,
-            )
-            if response.choices:
-                return response.choices[0].message.content.replace('"', '').replace('<|begin_of_box|>', '').replace('<|end_of_box|>', ''), "✅ 反推提示词完毕"
-    except Exception as e:
-        return prompt, f"API调用异常：{str(e)}"
-    
+def encode_file(img):
+    format = (img.format or "PNG").upper()
+    buffer = io.BytesIO()
+    img.save(buffer, format=format)
+    byte_data = buffer.getvalue()
+    mime_type = f"image/{format.lower()}"
+    encoded_string = base64.b64encode(byte_data).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded_string}"
+
 
 def modelscope_generate(
     mode,
@@ -590,10 +508,6 @@ def modelscope_generate(
     seed_param,
     transformer_dropdown,
     image=None, 
-    mask_image=None, 
-    strength=None,
-    size_edit2=None, 
-    reserve_edit2=None,
 ):
     global stop_generation
     num_inference_steps = 50  
@@ -608,13 +522,20 @@ def modelscope_generate(
     ]
     if image:
         pil_img = image.convert("RGB")
-        filename = f"outputs/temp.png"
+        """pil_img = image.convert("RGB")
+        filename = f"outputs/20.PNG"
         pil_img.save(filename, format='PNG')
         mime_type, _ = mimetypes.guess_type(filename)
         if not mime_type or not mime_type.startswith("image/"):
             raise ValueError("不支持或无法识别的图像格式")
         with open(filename, "rb") as image_file:
-            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')"""
+        format = (pil_img.format or "PNG").upper()
+        buffer = io.BytesIO()
+        pil_img.save(buffer, format=format)
+        byte_data = buffer.getvalue()
+        mime_type = f"image/{format.lower()}"
+        encoded_string = base64.b64encode(byte_data).decode("utf-8")
         width, height = load_image(pil_img).size
     min_distance = float('inf') # 初始化最小距离为正无穷大
     for res_width, res_height in resolutions:
@@ -650,12 +571,6 @@ def modelscope_generate(
         pnginfo.add_text("true_cfg_scale", f"{str(true_cfg_scale)}\n")
         pnginfo.add_text("seed", f"{str(seed + i)}\n")
         pnginfo.add_text("models", f"{transformer_dropdown}\n")
-        """lora_str = ", ".join(lora_dropdown) if lora_dropdown else ""
-        pnginfo.add_text("lora", f"{lora_str}\n")
-        lora_weights_str = ", ".join(lora_weights) if lora_weights else ""
-        pnginfo.add_text("lora_weights", f"{lora_weights_str}\n")
-        if strength:
-            pnginfo.add_text("strength", f"{str(strength)}\n")"""
         if mode == "t2i_ms":
             response = requests.post(
                 f"{base_url}v1/images/generations",
@@ -676,7 +591,7 @@ def modelscope_generate(
                 headers={**common_headers, "X-ModelScope-Async-Mode": "true"},
                 data=json.dumps({
                     "model": "Qwen/Qwen-Image-Edit", # ModelScope Model-Id, required
-                    "image_url": f"{encoded_string}",
+                    "image": f"data:{mime_type};base64,{encoded_string}",
                     "prompt": prompt,
                     "negative_prompt": negative_prompt,
                     "num_inference_steps": num_inference_steps,
@@ -696,7 +611,6 @@ def modelscope_generate(
             data = result.json()
             if data["task_status"] == "SUCCEED":
                 image = Image.open(io.BytesIO(requests.get(data["output_images"][0]).content))
-                image.save("result_image.jpg")
                 break
             elif data["task_status"] == "FAILED":
                 print("Image Generation Failed.")
@@ -729,6 +643,16 @@ def stop_generate():
     return "🛑 等待生成中止"
 
 
+def calculate_dimensions(target_area, ratio):
+    width = math.sqrt(target_area * ratio)
+    height = width / ratio
+
+    width = round(width / 32) * 32
+    height = round(height / 32) * 32
+
+    return width, height
+
+
 def _generate_common(
     mode, 
     prompt, 
@@ -755,16 +679,33 @@ def _generate_common(
         seed = random.randint(0, np.iinfo(np.int32).max)
     else:
         seed = seed_param
-    if mode in ["edit", "edit2", "editinp", "editplus"]:
-        if width:
-            image_width = round(image.size[0] / image.size[1] * height / 32) * 32
-        ratio = image.size[0] / image.size[1]
-        calculated_width = math.sqrt(1024*1024 * ratio)
-        calculated_height = calculated_width / ratio
-        calculated_width = round(calculated_width / 32) * 32
-        calculated_height = round(calculated_height / 32) * 32
+    if mode in ["editplus"]:
+        CONDITION_IMAGE_SIZE = 384 * 384
+        VAE_IMAGE_SIZE = 1024 * 1024
         image_processor = VaeImageProcessor(vae_scale_factor=16)
-        calculated_image = image_processor.resize(image, calculated_height, calculated_width)
+        image_size = image[-1].size if isinstance(image, list) else image.size
+        calculated_width, calculated_height = calculate_dimensions(1024 * 1024, image_size[0] / image_size[1])
+        height = height or calculated_height
+        width = width or calculated_width
+        multiple_of = 16 * 2
+        width = width // multiple_of * multiple_of
+        height = height // multiple_of * multiple_of
+        if not isinstance(image, list):
+            image = [image]
+        condition_image_sizes = []
+        condition_images = []
+        vae_image_sizes = []
+        vae_images = []
+        for img in image:
+            image_width, image_height = img.size
+            condition_width, condition_height = calculate_dimensions(
+                CONDITION_IMAGE_SIZE, image_width / image_height
+            )
+            vae_width, vae_height = calculate_dimensions(VAE_IMAGE_SIZE, image_width / image_height)
+            condition_image_sizes.append((condition_width, condition_height))
+            vae_image_sizes.append((vae_width, vae_height))
+            condition_images.append(image_processor.resize(img, condition_height, condition_width))
+            vae_images.append(image_processor.preprocess(img, vae_height, vae_width).unsqueeze(2))
     if (mode != mode_loaded or prompt_cache != prompt or negative_prompt_cache != negative_prompt or 
         transformer_loaded != transformer_dropdown or lora_loaded != lora_dropdown or
           lora_loaded_weights != lora_weights or image_loaded!=image):
@@ -772,10 +713,12 @@ def _generate_common(
         prompt_cache, negative_prompt_cache, image_loaded = prompt, negative_prompt, image
         if mode == "t2i" or mode == "i2i" or mode == "inp" or mode == "con":
             prompt_embeds, prompt_embeds_mask = pipe.encode_prompt(prompt)
-            negative_prompt_embeds, negative_prompt_embeds_mask = pipe.encode_prompt(negative_prompt)
-        elif mode in ["edit", "edit2", "editinp", "editplus"]:
-            prompt_embeds, prompt_embeds_mask = pipe.encode_prompt(prompt, calculated_image)
-            negative_prompt_embeds, negative_prompt_embeds_mask = pipe.encode_prompt(negative_prompt, calculated_image)
+            if true_cfg_scale > 1:
+                negative_prompt_embeds, negative_prompt_embeds_mask = pipe.encode_prompt(negative_prompt)
+        elif mode in ["editplus"]:
+            prompt_embeds, prompt_embeds_mask = pipe.encode_prompt(image=condition_images, prompt=prompt)
+            if true_cfg_scale > 1:
+                negative_prompt_embeds, negative_prompt_embeds_mask = pipe.encode_prompt(image=condition_images, prompt=negative_prompt)
     for i in range(batch_images):
         if stop_generation:
             stop_generation = False
@@ -812,8 +755,8 @@ def _generate_common(
                     true_cfg_scale=true_cfg_scale,
                     prompt_embeds=prompt_embeds,
                     prompt_embeds_mask=prompt_embeds_mask,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+                    negative_prompt_embeds=negative_prompt_embeds if true_cfg_scale > 1 else None,
+                    negative_prompt_embeds_mask=negative_prompt_embeds_mask if true_cfg_scale > 1 else None,
                     generator=torch.Generator().manual_seed(seed + i),
                 )
             elif mode == "i2i":
@@ -826,8 +769,8 @@ def _generate_common(
                     true_cfg_scale=true_cfg_scale,
                     prompt_embeds=prompt_embeds,
                     prompt_embeds_mask=prompt_embeds_mask,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+                    negative_prompt_embeds=negative_prompt_embeds if true_cfg_scale > 1 else None,
+                    negative_prompt_embeds_mask=negative_prompt_embeds_mask if true_cfg_scale > 1 else None,
                     generator=torch.Generator().manual_seed(seed + i),
                 )
             elif mode == "inp":
@@ -841,8 +784,8 @@ def _generate_common(
                     true_cfg_scale=true_cfg_scale,
                     prompt_embeds=prompt_embeds,
                     prompt_embeds_mask=prompt_embeds_mask,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+                    negative_prompt_embeds=negative_prompt_embeds if true_cfg_scale > 1 else None,
+                    negative_prompt_embeds_mask=negative_prompt_embeds_mask if true_cfg_scale > 1 else None,
                     generator=torch.Generator().manual_seed(seed + i),
                 )
             elif mode == "con":
@@ -855,50 +798,8 @@ def _generate_common(
                     true_cfg_scale=true_cfg_scale,
                     prompt_embeds=prompt_embeds,
                     prompt_embeds_mask=prompt_embeds_mask,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
-                    generator=torch.Generator().manual_seed(seed + i),
-                )
-            elif mode == "edit":
-                output = pipe(
-                    image=calculated_image,
-                    num_inference_steps=num_inference_steps,
-                    true_cfg_scale=true_cfg_scale,
-                    prompt_embeds=prompt_embeds,
-                    prompt_embeds_mask=prompt_embeds_mask,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
-                    generator=torch.Generator().manual_seed(seed + i),
-                )
-            elif mode == "edit2":
-                output = pipe(
-                    image=calculated_image,
-                    width=image_width if size_edit2!="小尺寸" else None,
-                    height=height if size_edit2!="小尺寸" else None,
-                    num_inference_steps=num_inference_steps,
-                    true_cfg_scale=true_cfg_scale,
-                    prompt_embeds=prompt_embeds,
-                    prompt_embeds_mask=prompt_embeds_mask,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
-                    generator=torch.Generator().manual_seed(seed + i),
-                )
-                if reserve_edit2=="保留主体" and size_edit2=="大尺寸":
-                    output.images[0] = output.images[0].crop((0, 0, width, output.images[0].height))
-                elif reserve_edit2=="保留主体" and size_edit2=="小尺寸":
-                    reserve_width = round(width * calculated_height / height)
-                    output.images[0] = output.images[0].crop((0, 0, reserve_width, output.images[0].height))
-            elif mode == "editinp":
-                output = pipe(
-                    image=image,
-                    mask_image=mask_image,
-                    num_inference_steps=num_inference_steps,
-                    strength=strength,
-                    true_cfg_scale=true_cfg_scale,
-                    prompt_embeds=prompt_embeds,
-                    prompt_embeds_mask=prompt_embeds_mask,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+                    negative_prompt_embeds=negative_prompt_embeds if true_cfg_scale > 1 else None,
+                    negative_prompt_embeds_mask=negative_prompt_embeds_mask if true_cfg_scale > 1 else None,
                     generator=torch.Generator().manual_seed(seed + i),
                 )
             elif mode == "editplus":
@@ -906,9 +807,10 @@ def _generate_common(
                     image=image,
                     num_inference_steps=num_inference_steps,
                     true_cfg_scale=true_cfg_scale,
-                    guidance_scale=1.0,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
+                    prompt_embeds=prompt_embeds,
+                    prompt_embeds_mask=prompt_embeds_mask,
+                    negative_prompt_embeds=negative_prompt_embeds if true_cfg_scale > 1 else None,
+                    negative_prompt_embeds_mask=negative_prompt_embeds_mask if true_cfg_scale > 1 else None,
                     generator=torch.Generator().manual_seed(seed + i),
                 )
         image = output.images[0]
@@ -920,7 +822,7 @@ def _generate_common(
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
 
-
+#, progress=gr.Progress(track_tqdm=True)
 def generate_t2i(prompt, negative_prompt, width, height, num_inference_steps, 
                  batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
                  lora_dropdown, lora_weights, max_vram):
@@ -1074,110 +976,63 @@ def generate_edit(image, prompt, negative_prompt, num_inference_steps,
         )
 
 
-def generate_edit2(image, image2, prompt, negative_prompt, num_inference_steps,
-                  batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                  lora_dropdown, lora_weights, max_vram, size_edit2, reserve_edit2):
-    ratio = image.size[0] / image.size[1]
-    calculated_width = math.sqrt(1024*1024 * ratio)
-    calculated_height = calculated_width / ratio
-    calculated_width = round(calculated_width / 32) * 32
-    calculated_height = round(calculated_height / 32) * 32
-    image = image.convert("RGBA")
-    image2 = image2.convert("RGBA")
-    new_height = max(image.height, image2.height)
-    # 按比例调整宽度
-    image = image.resize((int(image.width * new_height / image.height), new_height))
-    image2 = image2.resize((int(image2.width * new_height / image2.height), new_height))
-    # 创建新画布
-    result = Image.new("RGBA", (image.width + image2.width, new_height))
-    # 拼接图片
-    result.paste(image, (0, 0))
-    result.paste(image2, (image.width, 0))
-    white_bg = Image.new("RGB", result.size, (255, 255, 255))
-    # 使用alpha通道作为掩码进行粘贴
-    white_bg.paste(result, mask=result.split()[3])
-    # 如果需要保存为RGB模式的图像
-    image = white_bg.convert("RGB")
-    yield from _generate_common(
-        mode="edit2",
-        image=image,
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        width=calculated_width,
-        height=calculated_height,
-        num_inference_steps=num_inference_steps,
-        batch_images=batch_images,
-        true_cfg_scale=true_cfg_scale,
-        seed_param=seed_param,
-        transformer_dropdown=transformer_dropdown, 
-        lora_dropdown=lora_dropdown,
-        lora_weights=lora_weights,
-        max_vram=max_vram,
-        size_edit2=size_edit2, 
-        reserve_edit2=reserve_edit2,
-    )
-
-
-def generate_editinp(image, prompt, negative_prompt, num_inference_steps,
-                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                  lora_dropdown, lora_weights, max_vram):
-    # 处理蒙版图像
-    mask_image = image["layers"][0]
-    mask_image = mask_image .convert("RGBA")
-    data = np.array(mask_image)
-    # 修改蒙版颜色（黑色->白色，透明->黑色）
-    black_pixels = (data[:, :, 0] == 0) & (data[:, :, 1] == 0) & (data[:, :, 2] == 0)
-    data[black_pixels, :3] = [255, 255, 255]
-    transparent_pixels = (data[:, :, 3] == 0)
-    data[transparent_pixels, :3] = [0, 0, 0]
-    mask_image = Image.fromarray(data)
-    # 提取背景图像
-    background_image = load_image(image["background"])
-    yield from _generate_common(
-        mode="editinp",
-        image=background_image,
-        mask_image=mask_image,
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        width=None,
-        height=None,
-        num_inference_steps=num_inference_steps,
-        strength=strength, 
-        batch_images=batch_images,
-        true_cfg_scale=true_cfg_scale,
-        seed_param=seed_param,
-        transformer_dropdown=transformer_dropdown, 
-        lora_dropdown=lora_dropdown,
-        lora_weights=lora_weights,
-        max_vram=max_vram
-    )
-
-
-def generate_editplus(image, prompt, negative_prompt, num_inference_steps,
+def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_editplus5, prompt, negative_prompt, num_inference_steps,
                   batch_images, true_cfg_scale, seed_param, transformer_dropdown,
                   lora_dropdown, lora_weights, max_vram):
-    image = image.convert("RGBA")
-    white_bg = Image.new("RGB", image.size, (255, 255, 255))
-    # 使用alpha通道作为掩码进行粘贴
-    white_bg.paste(image, mask=image.split()[3])
-    # 如果需要保存为RGB模式的图像
-    image = white_bg.convert("RGB")
-    yield from _generate_common(
-        mode="editplus",
-        image=image,
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        width=None,
-        height=None,
-        num_inference_steps=num_inference_steps,
-        batch_images=batch_images,
-        true_cfg_scale=true_cfg_scale,
-        seed_param=seed_param,
-        transformer_dropdown=transformer_dropdown, 
-        lora_dropdown=lora_dropdown,
-        lora_weights=lora_weights,
-        max_vram=max_vram
-    )
+    if "ModelScope" in transformer_dropdown:
+        yield from modelscope_generate(
+            mode="edit_ms",
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=None,
+            height=None,
+            batch_images=batch_images, 
+            seed_param=seed_param,
+            transformer_dropdown=transformer_dropdown,
+            image=image_editplus2,
+        )
+    else:
+        image = [image_editplus2, image_editplus3, image_editplus4, image_editplus5]
+        image = [img for img in image if img is not None]
+        images = []  # 用于存储所有处理后的图片
+        for img in image:  # 遍历图片地址列表
+            # 转换为RGBA
+            img = img.convert("RGBA")
+            # 创建白色背景
+            white_bg = Image.new("RGB", img.size, (255, 255, 255))
+            # 使用alpha通道作为掩码进行粘贴
+            white_bg.paste(img, mask=img.split()[3])
+            # 转换为RGB
+            img_rgb = white_bg.convert("RGB")
+            # 添加到结果列表
+            images.append(img_rgb)
+        yield from _generate_common(
+            mode="editplus",
+            image=images,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=None,
+            height=None,
+            num_inference_steps=num_inference_steps,
+            batch_images=batch_images,
+            true_cfg_scale=true_cfg_scale,
+            seed_param=seed_param,
+            transformer_dropdown=transformer_dropdown, 
+            lora_dropdown=lora_dropdown,
+            lora_weights=lora_weights,
+            max_vram=max_vram
+        )
+
+
+def change_reference_count(reference_count):
+    if reference_count == 0:
+        return gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+    elif reference_count == 1:
+        return gr.update(visible=True), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+    elif reference_count == 2:
+        return gr.update(visible=True), gr.update(visible=True), gr.update(visible=False, value=None)
+    elif reference_count == 3:
+        return gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
 
 
 def convert_lora(lora_in):
@@ -1242,16 +1097,16 @@ def load_image_info(image):
         info = "".join([f"{k}: {v}" for k, v in img.text.items()])
     else:
         info = "该文件不包含PNG文本元数据"
-    return info 
+    return gr.update(value=info) 
 
 
-def save_openai_config(transformer_dropdown, transformer_dropdown2, transformer_dropdown3, max_vram_tb, base_url_tb, api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb):
-    global max_vram, base_url, api_key, model_name, temperature, top_p, max_tokens, modelscope_api_key
+def save_openai_config(transformer_dropdown, transformer_dropdown2, max_vram_tb, base_url_tb, api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb):
+    global max_vram, base_url, api_key, model_name, temperature, top_p, max_tokens, modelscope_api_key, openai_base_url, openai_api_key
     max_vram, base_url, api_key, model_name, temperature, top_p, max_tokens, modelscope_api_key = max_vram_tb, base_url_tb, api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb
+    openai_base_url, openai_api_key = base_url_tb, api_key_tb
     config = {
         "TRANSFORMER_DROPDOWN": transformer_dropdown,
         "TRANSFORMER_DROPDOWN2": transformer_dropdown2,
-        "TRANSFORMER_DROPDOWN3": transformer_dropdown3,
         "MAX_VRAM": max_vram_tb,
         "OPENAI_BASE_URL": base_url_tb,
         "OPENAI_API_KEY": api_key_tb,
@@ -1287,8 +1142,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                 refresh_button = gr.Button("🔄 刷新模型", scale=0)
             with gr.Row():
                 transformer_dropdown = gr.Dropdown(label="QI模型", info="存放基础模型到models/transformer，仅支持mmgp转化版本", choices=transformer_choices, value=transformer_)
-                transformer_dropdown2 = gr.Dropdown(label="QIE模型", info="存放编辑模型到models/transformer，仅支持mmgp转化版本", choices=transformer_choices2, value=transformer_2)
-                transformer_dropdown3 = gr.Dropdown(label="QIEP模型", info="存放编辑模型到models/transformer，仅支持mmgp转化版本", choices=transformer_choices3, value=transformer_3)
+                transformer_dropdown2 = gr.Dropdown(label="QIEP模型", info="存放编辑模型到models/transformer，仅支持mmgp转化版本", choices=transformer_choices2, value=transformer_2)
                 lora_dropdown = gr.Dropdown(label="LoRA模型", info="存放LoRA模型到models/lora", choices=lora_choices, multiselect=True)
                 lora_weights = gr.Textbox(label="LoRA权重", info="Lora权重，多个权重请用英文逗号隔开。例如：0.8,0.5,0.2", value="")
     with gr.TabItem("文生图"):
@@ -1394,112 +1248,37 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                 info_con = gr.Textbox(label="提示信息", interactive=False)
                 image_output_con = gr.Gallery(label="生成结果", interactive=False)
                 stop_button_con = gr.Button("中止生成", variant="stop")
-    with gr.TabItem("图像编辑"):
-        with gr.Row():
-            with gr.Column():
-                image_edit = gr.Image(label="输入图片", type="pil", height=400, image_mode="RGBA")
-                prompt_edit = gr.Textbox(label="提示词", value="给左边的女孩换上右边的衣服")
-                negative_prompt_edit = gr.Textbox(label="负面提示词", value="")
-                with gr.Row():
-                    generate_button_edit = gr.Button("🎬 开始生成", variant='primary', scale=4)
-                    enhance_button_edit = gr.Button("提示词增强", scale=1)
-                    reverse_button_edit = gr.Button("反推提示词", scale=1)
-                with gr.Accordion("参数设置", open=True):
-                    gr.Markdown("分辨率自动计算")
-                    batch_images_edit = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_edit = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
-                    true_cfg_scale_edit = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
-                    seed_param_edit = gr.Number(label="种子，请输入自然数，-1为随机", value=0)
-            with gr.Column():
-                info_edit = gr.Textbox(label="提示信息", interactive=False)
-                image_output_edit = gr.Gallery(label="生成结果", interactive=False)
-                stop_button_edit = gr.Button("中止生成", variant="stop")
-    with gr.TabItem("图像编辑（双图）"):
-        with gr.Row():
-            with gr.Column():
-                with gr.Row():
-                    image_edit2 = gr.Image(label="输入主体图片", type="pil", height=400, image_mode="RGBA")
-                    image_edit3 = gr.Image(label="输入参考图片", type="pil", height=400, image_mode="RGBA")
-                prompt_edit2 = gr.Textbox(label="提示词", value="给左边的女孩换上右边的衣服")
-                negative_prompt_edit2 = gr.Textbox(label="负面提示词", value="")
-                with gr.Row():
-                    generate_button_edit2 = gr.Button("🎬 开始生成", variant='primary', scale=4)
-                    enhance_button_edit2 = gr.Button("提示词增强", scale=1)
-                    reverse_button_edit2 = gr.Button("反推提示词", scale=1)
-                with gr.Accordion("参数设置", open=True):
-                    with gr.Row():
-                        size_edit2 = gr.Radio(label="分辨率", choices=["小尺寸", "大尺寸"], value="小尺寸")
-                    with gr.Row():
-                        reserve_edit2 = gr.Radio(label="保留部分", choices=["保留全部", "保留主体"], value="保留主体")
-                    batch_images_edit2 = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_edit2 = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
-                    true_cfg_scale_edit2 = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
-                    seed_param_edit2 = gr.Number(label="种子，请输入自然数，-1为随机", value=0)
-            with gr.Column():
-                info_edit2 = gr.Textbox(label="提示信息", interactive=False)
-                image_output_edit2 = gr.Gallery(label="生成结果", interactive=False)
-                stop_button_edit2 = gr.Button("中止生成", variant="stop")
-    with gr.TabItem("局部编辑"):
-        with gr.Row():
-            with gr.Column():
-                image_editinp = gr.ImageMask(label="输入蒙版", type="pil", height=400)
-                prompt_editinp = gr.Textbox(label="提示词", value="给左边的女孩换上右边的衣服")
-                negative_prompt_editinp = gr.Textbox(label="负面提示词", value="")
-                with gr.Row():
-                    generate_button_editinp = gr.Button("🎬 开始生成", variant='primary', scale=4)
-                    enhance_button_editinp = gr.Button("提示词增强", scale=1)
-                    reverse_button_editinp = gr.Button("反推提示词", scale=1)
-                with gr.Accordion("参数设置", open=True):
-                    gr.Markdown("分辨率自动计算")
-                    strength_editinp = gr.Slider(label="strength", minimum=0, maximum=1, step=0.01, value=1.0)
-                    batch_images_editinp = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_editinp = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
-                    true_cfg_scale_editinp = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
-                    seed_param_editinp = gr.Number(label="种子，请输入自然数，-1为随机", value=0)
-            with gr.Column():
-                info_editinp = gr.Textbox(label="提示信息", interactive=False)
-                image_output_editinp = gr.Gallery(label="生成结果", interactive=False)
-                stop_button_editinp = gr.Button("中止生成", variant="stop")
-    with gr.TabItem("单图编辑"):
-        with gr.Row():
-            with gr.Column():
-                image_editplus = gr.Image(label="输入图片", type="pil", height=400, image_mode="RGBA")
-                prompt_editplus = gr.Textbox(label="提示词", value="给左边的女孩换上右边的衣服")
-                negative_prompt_editplus = gr.Textbox(label="负面提示词", value="")
-                with gr.Row():
-                    generate_button_editplus = gr.Button("🎬 开始生成", variant='primary', scale=4)
-                    enhance_button_editplus = gr.Button("提示词增强", scale=1)
-                    reverse_button_editplus = gr.Button("反推提示词", scale=1)
-                with gr.Accordion("参数设置", open=True):
-                    gr.Markdown("分辨率自动计算")
-                    batch_images_editplus = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_editplus = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
-                    true_cfg_scale_editplus = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
-                    seed_param_editplus = gr.Number(label="种子，请输入自然数，-1为随机", value=0)
-            with gr.Column():
-                info_editplus = gr.Textbox(label="提示信息", interactive=False)
-                image_output_editplus = gr.Gallery(label="生成结果", interactive=False)
-                stop_button_editplus = gr.Button("中止生成", variant="stop")
     with gr.TabItem("多图编辑"):
         with gr.Row():
             with gr.Column():
-                image_editplus = gr.Image(label="输入图片", type="pil", height=400, image_mode="RGBA")
-                prompt_editplus = gr.Textbox(label="提示词", value="给左边的女孩换上右边的衣服")
-                negative_prompt_editplus = gr.Textbox(label="负面提示词", value="")
                 with gr.Row():
-                    generate_button_editplus = gr.Button("🎬 开始生成", variant='primary', scale=4)
-                    enhance_button_editplus = gr.Button("提示词增强", scale=1)
-                    reverse_button_editplus = gr.Button("反推提示词", scale=1)
+                    image_editplus2 = gr.Image(label="输入图片", type="pil", height=300, image_mode="RGBA")
+                    image_editplus3 = gr.Image(label="输入图片", type="pil", height=300, image_mode="RGBA", visible=False)
+                    image_editplus4 = gr.Image(label="输入图片", type="pil", height=300, image_mode="RGBA", visible=False)
+                    image_editplus5 = gr.Image(label="输入图片", type="pil", height=300, image_mode="RGBA", visible=False)
+                reference_count = gr.Slider(
+                    label="参考图数量", 
+                    minimum=0, 
+                    maximum=3, 
+                    step=1, 
+                    value=0,
+                )
+                prompt_editplus2 = gr.Textbox(label="提示词", value="给左边的女孩换上右边的衣服")
+                negative_prompt_editplus2 = gr.Textbox(label="负面提示词", value="")
+                with gr.Row():
+                    generate_button_editplus2 = gr.Button("🎬 开始生成", variant='primary', scale=4)
+                    enhance_button_editplus2 = gr.Button("提示词增强", scale=1)
+                    reverse_button_editplus2 = gr.Button("反推提示词", scale=1)
                 with gr.Accordion("参数设置", open=True):
                     gr.Markdown("分辨率自动计算")
-                    batch_images_editplus = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_editplus = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
-                    true_cfg_scale_editplus = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
-                    seed_param_editplus = gr.Number(label="种子，请输入自然数，-1为随机", value=0)
+                    batch_images_editplus2 = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
+                    num_inference_steps_editplus2 = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
+                    true_cfg_scale_editplus2 = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
+                    seed_param_editplus2 = gr.Number(label="种子，请输入自然数，-1为随机", value=0)
             with gr.Column():
-                info_editplus = gr.Textbox(label="提示信息", interactive=False)
-                image_output_editplus = gr.Gallery(label="生成结果", interactive=False)
-                stop_button_editplus = gr.Button("中止生成", variant="stop")
+                info_editplus2 = gr.Textbox(label="提示信息", interactive=False)
+                image_output_editplus2 = gr.Gallery(label="生成结果", interactive=False)
+                stop_button_editplus2 = gr.Button("中止生成", variant="stop")
     with gr.TabItem("转换lora"):
         with gr.Row():
             with gr.Column():
@@ -1514,7 +1293,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
             with gr.Column():
                 image_info = gr.Image(label="输入图片", type="filepath")
             with gr.Column():
-                info_info = gr.Textbox(label="图片信息", interactive=False)
+                info_info = gr.Textbox(label="图片信息", lines=5, interactive=False)
                 gr.Markdown("上传图片即可查看图片内保存的信息")
     with gr.TabItem("设置"):
         with gr.Row():
@@ -1722,145 +1501,47 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
         inputs=[], 
         outputs=[info_con]
     )
-    # 图像编辑
+    # 多图编辑
+    reference_count.change(
+        fn=change_reference_count,
+        inputs=[reference_count],
+        outputs=[image_editplus3, image_editplus4, image_editplus5]
+    )
     gr.on(
-        triggers=[generate_button_edit.click, prompt_edit.submit, negative_prompt_edit.submit],
-        fn = generate_edit,
+        triggers=[generate_button_editplus2.click, prompt_editplus2.submit, negative_prompt_editplus2.submit],
+        fn = generate_editplus2,
         inputs = [
-            image_edit,
-            prompt_edit,
-            negative_prompt_edit,
-            num_inference_steps_edit,
-            batch_images_edit,
-            true_cfg_scale_edit, 
-            seed_param_edit,
+            image_editplus2,
+            image_editplus3,
+            image_editplus4,
+            image_editplus5,
+            prompt_editplus2,
+            negative_prompt_editplus2,
+            num_inference_steps_editplus2,
+            batch_images_editplus2,
+            true_cfg_scale_editplus2, 
+            seed_param_editplus2,
             transformer_dropdown2,
             lora_dropdown, 
             lora_weights,
             max_vram_tb,
         ],
-        outputs = [image_output_edit, info_edit]
+        outputs = [image_output_editplus2, info_editplus2]
     )
-    enhance_button_edit.click(
-        fn=enhance_prompt_edit, 
-        inputs=[prompt_edit, image_edit], 
-        outputs=[prompt_edit, info_edit]
-    )
-    reverse_button_edit.click(
-        fn=enhance_prompt, 
-        inputs=[prompt_edit, image_edit], 
-        outputs=[prompt_edit, info_edit]
-    )
-    stop_button_edit.click(
-        fn=stop_generate, 
-        inputs=[], 
-        outputs=[info_edit]
-    )
-    # 图像编辑（双图）
-    gr.on(
-        triggers=[generate_button_edit2.click, prompt_edit2.submit, negative_prompt_edit2.submit],
-        fn = generate_edit2,
-        inputs = [
-            image_edit2,
-            image_edit3,
-            prompt_edit2,
-            negative_prompt_edit2,
-            num_inference_steps_edit2,
-            batch_images_edit2,
-            true_cfg_scale_edit2, 
-            seed_param_edit2,
-            transformer_dropdown2,
-            lora_dropdown, 
-            lora_weights,
-            max_vram_tb,
-            size_edit2,
-            reserve_edit2,
-        ],
-        outputs = [image_output_edit2, info_edit2]
-    )
-    enhance_button_edit2.click(
+    enhance_button_editplus2.click(
         fn=enhance_prompt_edit2, 
-        inputs=[prompt_edit2, image_edit2, image_edit3], 
-        outputs=[prompt_edit2, info_edit2]
+        inputs=[prompt_editplus2, image_editplus2, image_editplus3, image_editplus4, image_editplus5], 
+        outputs=[prompt_editplus2, info_editplus2]
     )
-    reverse_button_edit2.click(
+    reverse_button_editplus2.click(
         fn=enhance_prompt, 
-        inputs=[prompt_edit2, image_edit2], 
-        outputs=[prompt_edit2, info_edit2]
+        inputs=[prompt_editplus2, image_editplus2], 
+        outputs=[prompt_editplus2, info_editplus2]
     )
-    stop_button_edit2.click(
+    stop_button_editplus2.click(
         fn=stop_generate, 
         inputs=[], 
-        outputs=[info_edit2]
-    )
-    # 局部编辑
-    gr.on(
-        triggers=[generate_button_editinp.click, prompt_editinp.submit, negative_prompt_editinp.submit],
-        fn = generate_editinp,
-        inputs = [
-            image_editinp,
-            prompt_editinp,
-            negative_prompt_editinp,
-            num_inference_steps_editinp,
-            strength_editinp,
-            batch_images_editinp,
-            true_cfg_scale_editinp, 
-            seed_param_editinp,
-            transformer_dropdown2,
-            lora_dropdown, 
-            lora_weights,
-            max_vram_tb,
-        ],
-        outputs = [image_output_editinp, info_editinp]
-    )
-    enhance_button_editinp.click(
-        fn=enhance_prompt_edit, 
-        inputs=[prompt_editinp, image_editinp], 
-        outputs=[prompt_editinp, info_editinp]
-    )
-    reverse_button_editinp.click(
-        fn=enhance_prompt, 
-        inputs=[prompt_editinp, image_editinp], 
-        outputs=[prompt_editinp, info_editinp]
-    )
-    stop_button_editinp.click(
-        fn=stop_generate, 
-        inputs=[], 
-        outputs=[info_editinp]
-    )
-    # 图像编辑PLUS
-    gr.on(
-        triggers=[generate_button_editplus.click, prompt_editplus.submit, negative_prompt_editplus.submit],
-        fn = generate_editplus,
-        inputs = [
-            image_editplus,
-            prompt_editplus,
-            negative_prompt_editplus,
-            num_inference_steps_editplus,
-            batch_images_editplus,
-            true_cfg_scale_editplus, 
-            seed_param_editplus,
-            transformer_dropdown3,
-            lora_dropdown, 
-            lora_weights,
-            max_vram_tb,
-        ],
-        outputs = [image_output_editplus, info_editplus]
-    )
-    enhance_button_editplus.click(
-        fn=enhance_prompt_edit, 
-        inputs=[prompt_editplus, image_editplus], 
-        outputs=[prompt_editplus, info_editplus]
-    )
-    reverse_button_editplus.click(
-        fn=enhance_prompt, 
-        inputs=[prompt_editplus, image_editplus], 
-        outputs=[prompt_editplus, info_editplus]
-    )
-    stop_button_editplus.click(
-        fn=stop_generate, 
-        inputs=[], 
-        outputs=[info_editplus]
+        outputs=[info_editplus2]
     )
     # 转换lora
     convert_button.click(
@@ -1877,7 +1558,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
     # 设置
     save_button.click(
         fn=save_openai_config,
-        inputs=[transformer_dropdown, transformer_dropdown2, transformer_dropdown3, max_vram_tb, openai_base_url_tb, openai_api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb],
+        inputs=[transformer_dropdown, transformer_dropdown2, max_vram_tb, openai_base_url_tb, openai_api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb],
         outputs=[info_config],
     )
 

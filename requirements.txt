@@ -10,3 +10,4 @@ mmgp
 peft
 openai
 modelscope
+controlnet-aux
