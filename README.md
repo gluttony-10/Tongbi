@@ -14,13 +14,6 @@
 
 一键包详见 [bilibili@十字鱼](https://space.bilibili.com/893892)
 
-## 更新内容
-250606 更新一版基于flux官方库的代码，然后放弃此代码，转向nunchaku
-
-250708 更新一版基于nunchaku的代码
-
-250924 放弃flux和nunchaku，改为使用Qwen-Image和mmgp
-
 ## 使用需求
 1.显卡支持BF16
 

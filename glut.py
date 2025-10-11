@@ -1,3 +1,7 @@
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="timm.models.layers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="timm.models.registry")
+warnings.filterwarnings("ignore", category=UserWarning, module="controlnet_aux.segment_anything.modeling.tiny_vit_sam")
 import gc
 import io
 import os
@@ -10,6 +14,7 @@ import base64
 import torch
 import torch.nn as nn
 import numpy as np
+import socket
 import psutil
 import random
 import gradio as gr
@@ -22,6 +27,7 @@ from diffusers import QwenImageTransformer2DModel, FlowMatchEulerDiscreteSchedul
 from diffusers.utils import load_image
 from diffusers.image_processor import VaeImageProcessor
 import safetensors.torch
+from controlnet_aux.processor import Processor
 
 parser = argparse.ArgumentParser() 
 parser.add_argument("--server_name", type=str, default="127.0.0.1", help="IP地址，局域网访问改为0.0.0.0")
@@ -825,7 +831,7 @@ def _generate_common(
 #, progress=gr.Progress(track_tqdm=True)
 def generate_t2i(prompt, negative_prompt, width, height, num_inference_steps, 
                  batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram):
+                 lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
     if "ModelScope" in transformer_dropdown:
         yield from modelscope_generate(
             mode="t2i_ms",
@@ -857,7 +863,7 @@ def generate_t2i(prompt, negative_prompt, width, height, num_inference_steps,
 
 def generate_i2i(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram):
+                 lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
     image = load_image(image)
     yield from _generate_common(
         mode="i2i",
@@ -880,7 +886,7 @@ def generate_i2i(image, prompt, negative_prompt, width, height, num_inference_st
 
 def generate_inp(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                 lora_dropdown, lora_weights, max_vram):
+                 lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
     # 处理蒙版图像
     mask_image = image["layers"][0]
     mask_image = mask_image .convert("RGBA")
@@ -915,7 +921,7 @@ def generate_inp(image, prompt, negative_prompt, width, height, num_inference_st
 
 def generate_con(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram):
+                 lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
     image = load_image(image)
     yield from _generate_common(
         mode="con",
@@ -938,7 +944,7 @@ def generate_con(image, prompt, negative_prompt, width, height, num_inference_st
 
 def generate_edit(image, prompt, negative_prompt, num_inference_steps,
                   batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                  lora_dropdown, lora_weights, max_vram):
+                  lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
     if "ModelScope" in transformer_dropdown:
         yield from modelscope_generate(
             mode="edit_ms",
@@ -978,7 +984,7 @@ def generate_edit(image, prompt, negative_prompt, num_inference_steps,
 
 def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_editplus5, prompt, negative_prompt, num_inference_steps,
                   batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                  lora_dropdown, lora_weights, max_vram):
+                  lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
     if "ModelScope" in transformer_dropdown:
         yield from modelscope_generate(
             mode="edit_ms",
@@ -1022,6 +1028,23 @@ def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_
             lora_weights=lora_weights,
             max_vram=max_vram
         )
+
+
+def generate_cont(image, processor_id):
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"outputs/{timestamp}.png"
+    processor = Processor(processor_id)
+    img = image.convert("RGBA")
+    white_bg = Image.new("RGB", img.size, (255, 255, 255))
+    white_bg.paste(img, mask=img.split()[3])
+    img_rgb = white_bg.convert("RGB")
+    width, height = img_rgb.size
+    width = (width // 64) * 64
+    height = (height // 64) * 64
+    img_rgb = img_rgb.resize((width, height), Image.LANCZOS)
+    processed_image = processor(img_rgb, to_pil=True)
+    processed_image.save(filename)
+    yield processed_image, f"✅ 预处理完成,保存地址{filename}"
 
 
 def change_reference_count(reference_count):
@@ -1090,13 +1113,13 @@ def convert_lora(lora_in):
     yield results, f"✅ 全部转换完成，请点击刷新模型"
 
 
-def load_image_info(image):
-    img = Image.open(image)
+def load_image_info(selected_index, gallery):
+    img = Image.open(gallery[selected_index][0])
     # 读取PNG文本信息块
     if img.format == 'PNG' and hasattr(img, 'text'):
         info = "".join([f"{k}: {v}" for k, v in img.text.items()])
     else:
-        info = "该文件不包含PNG文本元数据"
+        info = "None"
     return gr.update(value=info) 
 
 
@@ -1121,16 +1144,59 @@ def save_openai_config(transformer_dropdown, transformer_dropdown2, max_vram_tb,
     return "✅ 配置已保存到本地文件"
 
 
+def find_port(port: int) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        if s.connect_ex(("localhost", port)) == 0:
+            print(f"端口 {port} 已被占用，正在寻找可用端口...")
+            return find_port(port=port + 1)
+        else:
+            return port
+
+
+def load_gallery():
+    outputs_dir = "outputs"
+    if not os.path.exists(outputs_dir):
+        return [], "❌ outputs 文件夹不存在"
+    
+    image_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')
+    
+    image_files = []
+    for file in os.listdir(outputs_dir):
+        if file.lower().endswith(image_extensions):
+            image_files.append(os.path.join(outputs_dir, file))
+
+    image_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    
+    if not image_files:
+        return [], "📁 outputs 文件夹中没有图片文件"
+    
+    # 直接返回文件路径列表，不再加载为PIL图像
+    return image_files, f"✅ 成功加载 {len(image_files)} 张图片"
+
+
+def refresh_gallery():
+    try:
+        file_paths, info = load_gallery()
+        return file_paths, info  # 现在返回的是文件路径列表
+    except Exception as e:
+        return [], f"❌ 加载图库时出错: {str(e)}"
+    
+
+def update_selection(selected_state: gr.SelectData):
+    return selected_state.index
+
+
 with gr.Blocks(theme=gr.themes.Base()) as demo:
     gr.Markdown("""
             <div>
-                <h2 style="font-size: 30px;text-align: center;">Qwen-Image</h2>
+                <h2 style="font-size: 30px;text-align: center;">通臂 Tongbi</h2>
             </div>
             <div style="text-align: center;">
                 十字鱼
                 <a href="https://space.bilibili.com/893892">🌐bilibili</a> 
-                |Qwen-Image
-                <a href="https://github.com/QwenLM/Qwen-Image">🌐github</a> 
+                |Tongbi
+                <a href="https://github.com/gluttony-10/Tongbi">🌐github</a> 
             </div>
             <div style="text-align: center; font-weight: bold; color: red;">
                 ⚠️ 该演示仅供学术研究和体验使用。
@@ -1279,6 +1345,30 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                 info_editplus2 = gr.Textbox(label="提示信息", interactive=False)
                 image_output_editplus2 = gr.Gallery(label="生成结果", interactive=False)
                 stop_button_editplus2 = gr.Button("中止生成", variant="stop")
+    with gr.TabItem("ControlNet预处理"):
+        with gr.Row():
+            with gr.Column():
+                image_cont = gr.Image(label="输入图片", type="pil", height=400)
+                processor_cont = gr.Dropdown(label="预处理", choices=[
+                    "canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", 
+                    "lineart_anime", "lineart_coarse", "lineart_realistic", "mediapipe_face", 
+                    "mlsd", "normal_bae", "openpose", "openpose_face", 
+                    "openpose_faceonly", "openpose_full", "openpose_hand", "scribble_hed", 
+                    "scribble_pidinet", "shuffle", "softedge_hed", "softedge_hedsafe", 
+                    "softedge_pidinet", "softedge_pidsafe"])
+                generate_button_cont = gr.Button("🎬 开始生成", variant='primary', scale=4)
+            with gr.Column():
+                info_cont = gr.Textbox(label="提示信息", interactive=False)
+                image_output_cont = gr.Image(label="生成结果", interactive=False)
+                with gr.Row():
+                    send_to_i2i = gr.Button("发送到图生图", scale=1)
+                    send_to_inp = gr.Button("发送到局部重绘", scale=1)
+                    send_to_con = gr.Button("发送到ControlNet", scale=1)
+                with gr.Row():
+                    send_to_edit2 = gr.Button("发送到多图编辑1", scale=1)
+                    send_to_edit3 = gr.Button("发送到多图编辑2", scale=1)
+                    send_to_edit4 = gr.Button("发送到多图编辑3", scale=1)
+                    send_to_edit5 = gr.Button("发送到多图编辑4", scale=1)
     with gr.TabItem("转换lora"):
         with gr.Row():
             with gr.Column():
@@ -1288,13 +1378,24 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                 info_lora = gr.Textbox(label="提示信息", interactive=False)
                 lora_out = gr.File(label="输出文件", type="filepath", interactive=False)
                 gr.Markdown("可转化lora为diffusers可以使用的lora，比如转化[魔搭](https://modelscope.cn/aigc/modelTraining)训练的lora。")
-    with gr.TabItem("图片信息"):
+    with gr.TabItem("图库"):
         with gr.Row():
-            with gr.Column():
-                image_info = gr.Image(label="输入图片", type="filepath")
-            with gr.Column():
-                info_info = gr.Textbox(label="图片信息", lines=5, interactive=False)
-                gr.Markdown("上传图片即可查看图片内保存的信息")
+            with gr.Column(scale=3):
+                refresh_gallery_button = gr.Button("🔄 刷新图库")
+                gallery = gr.Gallery(label="图库", columns=4, height="auto", object_fit="cover")
+                selected_index = gr.Number(value=-1, visible=False)
+            with gr.Column(scale=2):
+                gallery_info = gr.Textbox(label="提示信息", interactive=False)
+                info_info = gr.Textbox(label="图片信息", lines=20, interactive=False)
+        with gr.Row():
+            send_to_i2i_gallery = gr.Button("发送到图生图")
+            send_to_inp_gallery = gr.Button("发送到局部重绘")
+            send_to_con_gallery = gr.Button("发送到ControlNet")
+            send_to_edit2_gallery = gr.Button("发送到多图编辑1")
+            send_to_edit3_gallery = gr.Button("发送到多图编辑2")
+            send_to_edit4_gallery = gr.Button("发送到多图编辑3")
+            send_to_edit5_gallery = gr.Button("发送到多图编辑4")
+            send_to_cont_gallery = gr.Button("发送到ControlNet预处理")
     with gr.TabItem("设置"):
         with gr.Row():
             with gr.Column():
@@ -1543,17 +1644,114 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
         inputs=[], 
         outputs=[info_editplus2]
     )
+    # ControlNet预处理
+    generate_button_cont.click(
+        fn = generate_cont,
+        inputs = [
+            image_cont,
+            processor_cont,
+        ],
+        outputs = [image_output_cont, info_cont]
+    )
+    send_to_i2i.click(
+        fn=lambda x: x,
+        inputs=[image_output_cont],
+        outputs=[image_i2i]
+    )
+    send_to_inp.click(
+        fn=lambda x: {"background": x, "layers": [], "composite": x},
+        inputs=[image_output_cont],
+        outputs=[image_inp]
+    )
+    send_to_con.click(
+        fn=lambda x: x,
+        inputs=[image_output_cont],
+        outputs=[image_con]
+    )
+    send_to_edit2.click(
+        fn=lambda x: x,
+        inputs=[image_output_cont],
+        outputs=[image_editplus2]
+    )
+    send_to_edit3.click(
+        fn=lambda x: x,
+        inputs=[image_output_cont],
+        outputs=[image_editplus3]
+    )
+    send_to_edit4.click(
+        fn=lambda x: x,
+        inputs=[image_output_cont],
+        outputs=[image_editplus4]
+    )
+    send_to_edit5.click(
+        fn=lambda x: x,
+        inputs=[image_output_cont],
+        outputs=[image_editplus5]
+    )
     # 转换lora
     convert_button.click(
         fn=convert_lora,
         inputs = [lora_in],
         outputs = [lora_out, info_lora]
     )
-    # 图片信息
-    image_info.upload(
+    # 图库
+    refresh_gallery_button.click(
+        fn=refresh_gallery,
+        inputs=[],
+        outputs=[gallery, gallery_info]
+    )
+    demo.load(
+        fn=refresh_gallery,
+        inputs=[],
+        outputs=[gallery, gallery_info]
+    )
+    gallery.select(
+        fn=update_selection,
+        outputs=selected_index
+    ).then(
         fn=load_image_info,
-        inputs=[image_info],
+        inputs=[selected_index, gallery],
         outputs=[info_info]
+    )
+    send_to_i2i_gallery.click(
+        fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
+        inputs=[selected_index, gallery],
+        outputs=[image_i2i]
+    )
+    send_to_inp_gallery.click(
+        fn=lambda idx, gallery: {"background": Image.open(gallery[idx][0]), "layers": [], "composite": Image.open(gallery[idx][0])} if idx >= 0 and idx < len(gallery) else None,
+        inputs=[selected_index, gallery],
+        outputs=[image_inp]
+    )
+    send_to_con_gallery.click(
+        fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
+        inputs=[selected_index, gallery],
+        outputs=[image_con]
+    )
+    send_to_edit2_gallery.click(
+        fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
+        inputs=[selected_index, gallery],
+        outputs=[image_editplus2]
+    )
+    send_to_edit3_gallery.click(
+        fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
+        inputs=[selected_index, gallery],
+        outputs=[image_editplus3]
+    )
+    send_to_edit4_gallery.click(
+        fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
+        inputs=[selected_index, gallery],
+        outputs=[image_editplus4]
+    )
+    send_to_edit5_gallery.click(
+        fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
+        inputs=[selected_index, gallery],
+        outputs=[image_editplus5]
+    )
+    send_to_cont_gallery.click(
+        fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
+        inputs=[selected_index, gallery],
+        outputs=[image_cont]
     )
     # 设置
     save_button.click(
@@ -1566,7 +1764,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
 if __name__ == "__main__": 
     demo.launch(
         server_name=args.server_name, 
-        server_port=args.server_port,
+        server_port=find_port(args.server_port),
         share=args.share, 
         mcp_server=args.mcp_server,
         inbrowser=True,

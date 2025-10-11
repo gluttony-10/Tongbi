@@ -1,7 +1,7 @@
 torch==2.7.0
 torchaudio
 torchvision
-transformers
+transformers==4.56.2
 huggingface_hub
 gradio
 numpy==1.26.4
@@ -11,3 +11,5 @@ peft
 openai
 modelscope
 controlnet-aux
+mediapipe
+timm
