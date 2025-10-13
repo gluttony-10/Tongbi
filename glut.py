@@ -23,10 +23,11 @@ import requests
 import argparse
 import datetime
 import mimetypes
-from diffusers import QwenImageTransformer2DModel, FlowMatchEulerDiscreteScheduler, QwenImageImg2ImgPipeline, QwenImagePipeline, QwenImageInpaintPipeline, QwenImageEditPipeline, QwenImageControlNetPipeline, QwenImageControlNetModel, QwenImageEditInpaintPipeline, QwenImageEditPlusPipeline
+from diffusers import QwenImageTransformer2DModel, FlowMatchEulerDiscreteScheduler, QwenImageImg2ImgPipeline, QwenImagePipeline, QwenImageInpaintPipeline, QwenImageControlNetPipeline, QwenImageControlNetModel, QwenImageEditPlusPipeline
 from diffusers.utils import load_image
 from diffusers.image_processor import VaeImageProcessor
 import safetensors.torch
+from transformers import Qwen2_5_VLForConditionalGeneration
 from controlnet_aux.processor import Processor
 
 parser = argparse.ArgumentParser() 
@@ -82,7 +83,7 @@ if os.path.exists(CONFIG_FILE):
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         config = json.load(f)
 #默认设置
-transformer_ = config.get("TRANSFORMER_DROPDOWN", "Qwen-Image-Lightning-8steps-V1.1-mmgp.safetensors")
+transformer_ = config.get("TRANSFORMER_DROPDOWN", "Qwen-Image-Lightning-4steps-V2.0-mmgp.safetensors")
 transformer_2 = config.get("TRANSFORMER_DROPDOWN2", "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-mmgp.safetensors")
 max_vram = float(config.get("MAX_VRAM", "0.8"))
 openai_base_url = config.get("OPENAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
@@ -194,10 +195,16 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
         mode_loaded, transformer_loaded, lora_loaded, lora_loaded_weights = (
             mode, transformer_dropdown, lora_dropdown, lora_weights
         )
+        text_encoder = offload.fast_load_transformers_model(
+            f"{model_id}/text_encoder/text_encoder-mmgp.safetensors",
+            do_quantize=False,
+            modelClass=Qwen2_5_VLForConditionalGeneration,
+            forcedConfigPath=f"{model_id}/text_encoder/config.json",
+        )
         # 加载transformer
         #transformer = QwenImageTransformer2DModel.from_pretrained(model_id, subfolder="transformer", torch_dtype=dtype)
         #transformer = QwenImageTransformer2DModel.from_single_file("Real-Qwen-Image-V1.safetensors", config=f"{model_id}/transformer/config.json", torch_dtype=dtype)
-        #transformer = load_and_merge_lora_weight_from_safetensors(transformer, "Qwen-Image-Edit-2509-Lightning-8steps-V1.0-fp32.safetensors")
+        #transformer = load_and_merge_lora_weight_from_safetensors(transformer, "Qwen-Image-Lightning-4steps-V2.0.safetensors")
         if "mmgp" in transformer_dropdown:
             transformer = offload.fast_load_transformers_model(
                 f"models/transformer/{transformer_dropdown}",
@@ -227,6 +234,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
         if mode != "con":
             pipe = pipeline_class.from_pretrained(
                 model_id, 
+                text_encoder=text_encoder,
                 transformer=transformer,
                 scheduler=scheduler,
                 torch_dtype=dtype,
@@ -236,6 +244,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
             pipe = pipeline_class.from_pretrained(
                 model_id, 
                 controlnet=controlnet,
+                text_encoder=text_encoder,
                 transformer=transformer,
                 scheduler=scheduler,
                 torch_dtype=dtype,
@@ -254,9 +263,10 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
             pipe, 
             profile_type.LowRAM_HighVRAM, 
             budgets={'*': budgets}, 
+            extraModelsToQuantize = ["text_encoder"],
             compile=True if args.compile else False,
         )
-        #offload.save_model(pipe.transformer, "models/transformer/mmgp.safetensors")
+        #offload.save_model(pipe.transformer, "models/transformer-mmgp.safetensors")
 
 
 def load_lora(lora_dropdown, lora_weights):
@@ -831,7 +841,7 @@ def _generate_common(
 #, progress=gr.Progress(track_tqdm=True)
 def generate_t2i(prompt, negative_prompt, width, height, num_inference_steps, 
                  batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
+                 lora_dropdown, lora_weights, max_vram):
     if "ModelScope" in transformer_dropdown:
         yield from modelscope_generate(
             mode="t2i_ms",
@@ -863,7 +873,7 @@ def generate_t2i(prompt, negative_prompt, width, height, num_inference_steps,
 
 def generate_i2i(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
+                 lora_dropdown, lora_weights, max_vram):
     image = load_image(image)
     yield from _generate_common(
         mode="i2i",
@@ -886,7 +896,7 @@ def generate_i2i(image, prompt, negative_prompt, width, height, num_inference_st
 
 def generate_inp(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                 lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
+                 lora_dropdown, lora_weights, max_vram):
     # 处理蒙版图像
     mask_image = image["layers"][0]
     mask_image = mask_image .convert("RGBA")
@@ -921,7 +931,7 @@ def generate_inp(image, prompt, negative_prompt, width, height, num_inference_st
 
 def generate_con(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
+                 lora_dropdown, lora_weights, max_vram):
     image = load_image(image)
     yield from _generate_common(
         mode="con",
@@ -944,7 +954,7 @@ def generate_con(image, prompt, negative_prompt, width, height, num_inference_st
 
 def generate_edit(image, prompt, negative_prompt, num_inference_steps,
                   batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                  lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
+                  lora_dropdown, lora_weights, max_vram):
     if "ModelScope" in transformer_dropdown:
         yield from modelscope_generate(
             mode="edit_ms",
@@ -984,7 +994,7 @@ def generate_edit(image, prompt, negative_prompt, num_inference_steps,
 
 def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_editplus5, prompt, negative_prompt, num_inference_steps,
                   batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                  lora_dropdown, lora_weights, max_vram, progress=gr.Progress(track_tqdm=True)):
+                  lora_dropdown, lora_weights, max_vram):
     if "ModelScope" in transformer_dropdown:
         yield from modelscope_generate(
             mode="edit_ms",
@@ -1143,7 +1153,7 @@ def save_openai_config(transformer_dropdown, transformer_dropdown2, max_vram_tb,
         json.dump(config, f, ensure_ascii=False, indent=2)
     return "✅ 配置已保存到本地文件"
 
-
+# 解决冲突端口（感谢licyk提供的代码~）
 def find_port(port: int) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
@@ -1226,7 +1236,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                         height = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
                     exchange_button = gr.Button("🔄 交换宽高")
                     batch_images = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
+                    num_inference_steps = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
             with gr.Column():
@@ -1253,7 +1263,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                         adjust_button_i2i = gr.Button("根据图片调整宽高")
                     strength_i2i = gr.Slider(label="strength", minimum=0, maximum=1, step=0.01, value=0.5)
                     batch_images_i2i = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_i2i = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
+                    num_inference_steps_i2i = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale_i2i = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param_i2i = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
             with gr.Column():
@@ -1280,7 +1290,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                         adjust_button_inp = gr.Button("根据图片调整宽高")
                     strength_inp = gr.Slider(label="strength", minimum=0, maximum=1, step=0.01, value=0.8)
                     batch_images_inp = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_inp = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
+                    num_inference_steps_inp = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale_inp = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param_inp = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
             with gr.Column():
@@ -1307,7 +1317,7 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                         adjust_button_con = gr.Button("根据图片调整宽高")
                     strength_con = gr.Slider(label="strength（推荐0.8~1）", minimum=0, maximum=1, step=0.01, value=1.0)
                     batch_images_con = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_con = gr.Slider(label="采样步数（推荐8步）", minimum=1, maximum=100, step=1, value=8)
+                    num_inference_steps_con = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale_con = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param_con = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
             with gr.Column():
