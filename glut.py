@@ -75,6 +75,7 @@ negative_prompt_cache = None
 model_id = "models/Qwen-Image"
 stop_generation = False
 mmgp = None
+EXAMPLES_FILE = "examples.json"
 #确保输出文件夹存在
 os.makedirs("outputs", exist_ok=True)
 #读取设置
@@ -94,6 +95,7 @@ top_p = float(config.get("TOP_P", "0.6"))
 max_tokens = float(config.get("MAX_TOKENS", "16384"))
 modelscope_api_key = config.get("MODELSCOPE_API_KEY", "")
 
+
 def refresh_model():
     global transformer_choices, transformer_choices2, lora_choices
     transformer_dir = "models/transformer"
@@ -111,7 +113,47 @@ def refresh_model():
         lora_choices = []
     return gr.Dropdown(choices=transformer_choices), gr.Dropdown(choices=transformer_choices2), gr.Dropdown(choices=lora_choices)
 
+def initialize_examples_file():
+    """
+    初始化 EXAMPLES_FILE 文件，确保每个 TabItem 都有默认提示词
+    """
+    default_examples = {
+        "t2i": ["选择保存过的提示词"],
+        "i2i": ["选择保存过的提示词"],
+        "inp": ["选择保存过的提示词"],
+        "con": ["选择保存过的提示词"],
+        "editplus": ["选择保存过的提示词"]
+    }
+    
+    if not os.path.exists(EXAMPLES_FILE):
+        with open(EXAMPLES_FILE, "w", encoding="utf-8") as f:
+            json.dump(default_examples, f, ensure_ascii=False, indent=2)
+        print(f"✅ 已创建 {EXAMPLES_FILE} 并写入默认示例")
+    else:
+        # 检查现有文件是否包含所有必需的标签
+        with open(EXAMPLES_FILE, "r", encoding="utf-8") as f:
+            try:
+                existing_data = json.load(f)
+            except json.JSONDecodeError:
+                # 如果文件损坏或为空，重新创建
+                existing_data = {}
+        
+        # 确保所有标签都存在
+        updated = False
+        for tab in default_examples.keys():
+            if tab not in existing_data:
+                existing_data[tab] = default_examples[tab]
+                updated = True
+                
+        if updated:
+            with open(EXAMPLES_FILE, "w", encoding="utf-8") as f:
+                json.dump(existing_data, f, ensure_ascii=False, indent=2)
+            print(f"✅ 已更新 {EXAMPLES_FILE}，添加缺失的标签")
+
+
+initialize_examples_file()
 refresh_model()
+
 
 def build_lora_names(key, lora_down_key, lora_up_key, is_native_weight):
     base = "diffusion_model." if is_native_weight else ""
@@ -573,7 +615,7 @@ def modelscope_generate(
     for i in range(batch_images):
         if stop_generation:
             stop_generation = False
-            yield results, seed + i, "✅ 生成已中止"
+            yield results, f"✅ 生成已中止，最后种子数{seed+i-1}"
             break
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"outputs/{timestamp}.png"
@@ -653,6 +695,14 @@ def adjust_width_height(image):
     return int(width), int(height), "✅ 根据图片调整宽高"
 
 
+def adjust_width_height_editplus2(image):
+    image_width, image_height = image.size
+    vae_width, vae_height = calculate_dimensions(1024*1024, image_width / image_height)
+    calculated_height = vae_height // 32 * 32
+    calculated_width = vae_width // 32 * 32
+    return int(calculated_width), int(calculated_height), "✅ 根据图片调整宽高"
+
+
 def stop_generate():
     global stop_generation
     stop_generation = True
@@ -699,29 +749,18 @@ def _generate_common(
         CONDITION_IMAGE_SIZE = 384 * 384
         VAE_IMAGE_SIZE = 1024 * 1024
         image_processor = VaeImageProcessor(vae_scale_factor=16)
-        image_size = image[-1].size if isinstance(image, list) else image.size
-        calculated_width, calculated_height = calculate_dimensions(1024 * 1024, image_size[0] / image_size[1])
-        height = height or calculated_height
-        width = width or calculated_width
-        multiple_of = 16 * 2
-        width = width // multiple_of * multiple_of
-        height = height // multiple_of * multiple_of
         if not isinstance(image, list):
             image = [image]
-        condition_image_sizes = []
+        calculated_images = []
         condition_images = []
-        vae_image_sizes = []
-        vae_images = []
         for img in image:
             image_width, image_height = img.size
-            condition_width, condition_height = calculate_dimensions(
-                CONDITION_IMAGE_SIZE, image_width / image_height
-            )
+            condition_width, condition_height = calculate_dimensions(CONDITION_IMAGE_SIZE, image_width / image_height)
             vae_width, vae_height = calculate_dimensions(VAE_IMAGE_SIZE, image_width / image_height)
-            condition_image_sizes.append((condition_width, condition_height))
-            vae_image_sizes.append((vae_width, vae_height))
+            calculated_height = vae_height // 32 * 32
+            calculated_width = vae_width // 32 * 32
+            calculated_images.append(image_processor.resize(img, calculated_height, calculated_width))
             condition_images.append(image_processor.resize(img, condition_height, condition_width))
-            vae_images.append(image_processor.preprocess(img, vae_height, vae_width).unsqueeze(2))
     if (mode != mode_loaded or prompt_cache != prompt or negative_prompt_cache != negative_prompt or 
         transformer_loaded != transformer_dropdown or lora_loaded != lora_dropdown or
           lora_loaded_weights != lora_weights or image_loaded!=image):
@@ -820,7 +859,9 @@ def _generate_common(
                 )
             elif mode == "editplus":
                 output = pipe(
-                    image=image,
+                    image=calculated_images,
+                    width=width,
+                    height=height,
                     num_inference_steps=num_inference_steps,
                     true_cfg_scale=true_cfg_scale,
                     prompt_embeds=prompt_embeds,
@@ -952,47 +993,7 @@ def generate_con(image, prompt, negative_prompt, width, height, num_inference_st
     )
 
 
-def generate_edit(image, prompt, negative_prompt, num_inference_steps,
-                  batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                  lora_dropdown, lora_weights, max_vram):
-    if "ModelScope" in transformer_dropdown:
-        yield from modelscope_generate(
-            mode="edit_ms",
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            width=None,
-            height=None,
-            batch_images=batch_images, 
-            seed_param=seed_param,
-            transformer_dropdown=transformer_dropdown,
-            image=image,
-        )
-    else:
-        image = image.convert("RGBA")
-        white_bg = Image.new("RGB", image.size, (255, 255, 255))
-        # 使用alpha通道作为掩码进行粘贴
-        white_bg.paste(image, mask=image.split()[3])
-        # 如果需要保存为RGB模式的图像
-        image = white_bg.convert("RGB")
-        yield from _generate_common(
-            mode="edit",
-            image=image,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            width=None,
-            height=None,
-            num_inference_steps=num_inference_steps,
-            batch_images=batch_images,
-            true_cfg_scale=true_cfg_scale,
-            seed_param=seed_param,
-            transformer_dropdown=transformer_dropdown, 
-            lora_dropdown=lora_dropdown,
-            lora_weights=lora_weights,
-            max_vram=max_vram
-        )
-
-
-def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_editplus5, prompt, negative_prompt, num_inference_steps,
+def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_editplus5, prompt, negative_prompt, width, height, num_inference_steps,
                   batch_images, true_cfg_scale, seed_param, transformer_dropdown,
                   lora_dropdown, lora_weights, max_vram):
     if "ModelScope" in transformer_dropdown:
@@ -1027,8 +1028,8 @@ def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_
             image=images,
             prompt=prompt,
             negative_prompt=negative_prompt,
-            width=None,
-            height=None,
+            width=width,
+            height=height,
             num_inference_steps=num_inference_steps,
             batch_images=batch_images,
             true_cfg_scale=true_cfg_scale,
@@ -1197,7 +1198,57 @@ def update_selection(selected_state: gr.SelectData):
     return selected_state.index
 
 
-with gr.Blocks(theme=gr.themes.Base()) as demo:
+def load_examples(tab_name):
+    if os.path.exists(EXAMPLES_FILE):
+        with open(EXAMPLES_FILE, "r", encoding="utf-8") as f:
+            examples_data = json.load(f)
+            # 返回对应TabItem的示例列表，如果不存在则返回空列表
+            return examples_data.get(tab_name, [])
+    return []
+
+
+def save_example(prompt, tab_name):
+    # 读取现有数据或初始化空字典
+    if os.path.exists(EXAMPLES_FILE):
+        with open(EXAMPLES_FILE, "r", encoding="utf-8") as f:
+            examples_data = json.load(f)
+    else:
+        examples_data = {}
+    
+    # 确保当前TabItem有列表
+    if tab_name not in examples_data:
+        examples_data[tab_name] = []
+    
+    # 添加新示例（如果不存在）
+    if prompt and prompt not in examples_data[tab_name]:
+        examples_data[tab_name].append(prompt)
+    
+    # 保存更新后的数据
+    with open(EXAMPLES_FILE, "w", encoding="utf-8") as f:
+        json.dump(examples_data, f, ensure_ascii=False, indent=2)
+    
+    return gr.update(choices=examples_data[tab_name]), "✅ 提示词已保存"
+
+
+def scale_resolution_1_5(width, height):
+    """
+    将宽度和高度都放大1.5倍，并按照16的倍数向下取整
+    """
+    new_width = int(width * 1.5) // 16 * 16
+    new_height = int(height * 1.5) // 16 * 16
+    return new_width, new_height, "✅ 分辨率已调整为1.5倍"
+
+css = """
+.icon-btn {
+    min-width: unset !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+"""
+
+
+with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]), css=css) as demo:
     gr.Markdown("""
             <div>
                 <h2 style="font-size: 30px;text-align: center;">通臂 Tongbi</h2>
@@ -1229,16 +1280,25 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                 with gr.Row():
                     generate_button = gr.Button("🎬 开始生成", variant='primary', scale=5)
                     enhance_button = gr.Button("提示词增强", scale=1)
+                    save_example_button = gr.Button("💾", elem_classes="icon-btn")
                 with gr.Accordion("参数设置", open=True):
                     gr.Markdown("推荐分辨率：1328x1328、1664x928、1472x1104")
                     with gr.Row():
                         width = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1328)
                         height = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
-                    exchange_button = gr.Button("🔄 交换宽高")
+                    with gr.Row():
+                        exchange_button = gr.Button("🔄 交换宽高")
+                        scale_1_5_button = gr.Button("1.5倍分辨率")
                     batch_images = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
                     num_inference_steps = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
+                    examples_dropdown = gr.Dropdown(
+                        label="提示词库", 
+                        choices=load_examples("t2i"),
+                        interactive=True,
+                        scale=5
+                    )
             with gr.Column():
                 info = gr.Textbox(label="提示信息", interactive=False)
                 image_output = gr.Gallery(label="生成结果", interactive=False)
@@ -1253,19 +1313,26 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                     generate_button_i2i = gr.Button("🎬 开始生成", variant='primary', scale=4)
                     enhance_button_i2i = gr.Button("提示词增强", scale=1)
                     reverse_button_i2i = gr.Button("反推提示词", scale=1)
+                    save_example_button_i2i = gr.Button("💾", elem_classes="icon-btn")
                 with gr.Accordion("参数设置", open=True):
-                    gr.Markdown("推荐分辨率：1328x1328、1664x928、1472x1104")
+                    gr.Markdown("上传图像后分辨率自动计算")
                     with gr.Row():
                         width_i2i = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1328)
                         height_i2i = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
                     with gr.Row():
                         exchange_button_i2i = gr.Button("🔄 交换宽高")
-                        adjust_button_i2i = gr.Button("根据图片调整宽高")
+                        scale_1_5_button_i2i = gr.Button("1.5倍分辨率")
                     strength_i2i = gr.Slider(label="strength", minimum=0, maximum=1, step=0.01, value=0.5)
                     batch_images_i2i = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
                     num_inference_steps_i2i = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale_i2i = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param_i2i = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
+                    examples_dropdown_i2i = gr.Dropdown(
+                        label="提示词库", 
+                        choices=load_examples("i2i"),
+                        interactive=True,
+                        scale=5
+                    )
             with gr.Column():
                 info_i2i = gr.Textbox(label="提示信息", interactive=False)
                 image_output_i2i = gr.Gallery(label="生成结果", interactive=False)
@@ -1280,19 +1347,26 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                     generate_button_inp = gr.Button("🎬 开始生成", variant='primary', scale=4)
                     enhance_button_inp = gr.Button("提示词增强", scale=1)
                     reverse_button_inp = gr.Button("反推提示词", scale=1)
+                    save_example_button_inp = gr.Button("💾", elem_classes="icon-btn")
                 with gr.Accordion("参数设置", open=True):
-                    gr.Markdown("推荐分辨率：1328x1328、1664x928、1472x1104")
+                    gr.Markdown("上传图像后分辨率自动计算")
                     with gr.Row():
                         width_inp = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1328)
                         height_inp = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
                     with gr.Row():
                         exchange_button_inp = gr.Button("🔄 交换宽高")
-                        adjust_button_inp = gr.Button("根据图片调整宽高")
+                        scale_1_5_button_inp = gr.Button("1.5倍分辨率")
                     strength_inp = gr.Slider(label="strength", minimum=0, maximum=1, step=0.01, value=0.8)
                     batch_images_inp = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
                     num_inference_steps_inp = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale_inp = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param_inp = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
+                    examples_dropdown_inp = gr.Dropdown(
+                        label="提示词库", 
+                        choices=load_examples("inp"),
+                        interactive=True,
+                        scale=5
+                    )
             with gr.Column():
                 info_inp = gr.Textbox(label="提示信息", interactive=False)
                 image_output_inp = gr.Gallery(label="生成结果", interactive=False)
@@ -1307,19 +1381,26 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                     generate_button_con = gr.Button("🎬 开始生成", variant='primary', scale=4)
                     enhance_button_con = gr.Button("提示词增强", scale=1)
                     reverse_button_con = gr.Button("反推提示词", scale=1)
+                    save_example_button_con = gr.Button("💾", elem_classes="icon-btn")
                 with gr.Accordion("参数设置", open=True):
-                    gr.Markdown("分辨率请点击调整宽高")
+                    gr.Markdown("上传图像后分辨率自动计算")
                     with gr.Row():
                         width_con = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1328)
                         height_con = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
                     with gr.Row():
                         exchange_button_con = gr.Button("🔄 交换宽高")
-                        adjust_button_con = gr.Button("根据图片调整宽高")
+                        scale_1_5_button_con = gr.Button("1.5倍分辨率")
                     strength_con = gr.Slider(label="strength（推荐0.8~1）", minimum=0, maximum=1, step=0.01, value=1.0)
                     batch_images_con = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
                     num_inference_steps_con = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale_con = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param_con = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
+                    examples_dropdown_con = gr.Dropdown(
+                        label="提示词库", 
+                        choices=load_examples("con"),
+                        interactive=True,
+                        scale=5
+                    )
             with gr.Column():
                 info_con = gr.Textbox(label="提示信息", interactive=False)
                 image_output_con = gr.Gallery(label="生成结果", interactive=False)
@@ -1345,40 +1426,56 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
                     generate_button_editplus2 = gr.Button("🎬 开始生成", variant='primary', scale=4)
                     enhance_button_editplus2 = gr.Button("提示词增强", scale=1)
                     reverse_button_editplus2 = gr.Button("反推提示词", scale=1)
+                    save_example_button_editplus2 = gr.Button("💾", elem_classes="icon-btn")
                 with gr.Accordion("参数设置", open=True):
-                    gr.Markdown("分辨率自动计算")
+                    gr.Markdown("上传图像后分辨率自动计算")
+                    with gr.Row():
+                        width_editplus2 = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1024)
+                        height_editplus2 = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1024)
+                    with gr.Row():
+                        exchange_button_editplus2 = gr.Button("🔄 交换宽高")
+                        scale_1_5_button_editplus2 = gr.Button("1.5倍分辨率")
                     batch_images_editplus2 = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
                     num_inference_steps_editplus2 = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
                     true_cfg_scale_editplus2 = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
                     seed_param_editplus2 = gr.Number(label="种子，请输入自然数，-1为随机", value=0)
+                    examples_dropdown_editplus2 = gr.Dropdown(
+                        label="提示词库", 
+                        choices=load_examples("editplus"),
+                        interactive=True,
+                        scale=5
+                    )
             with gr.Column():
                 info_editplus2 = gr.Textbox(label="提示信息", interactive=False)
                 image_output_editplus2 = gr.Gallery(label="生成结果", interactive=False)
                 stop_button_editplus2 = gr.Button("中止生成", variant="stop")
     with gr.TabItem("ControlNet预处理"):
-        with gr.Row():
-            with gr.Column():
-                image_cont = gr.Image(label="输入图片", type="pil", height=400)
-                processor_cont = gr.Dropdown(label="预处理", choices=[
-                    "canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", 
-                    "lineart_anime", "lineart_coarse", "lineart_realistic", "mediapipe_face", 
-                    "mlsd", "normal_bae", "openpose", "openpose_face", 
-                    "openpose_faceonly", "openpose_full", "openpose_hand", "scribble_hed", 
-                    "scribble_pidinet", "shuffle", "softedge_hed", "softedge_hedsafe", 
-                    "softedge_pidinet", "softedge_pidsafe"])
-                generate_button_cont = gr.Button("🎬 开始生成", variant='primary', scale=4)
-            with gr.Column():
-                info_cont = gr.Textbox(label="提示信息", interactive=False)
-                image_output_cont = gr.Image(label="生成结果", interactive=False)
-                with gr.Row():
-                    send_to_i2i = gr.Button("发送到图生图", scale=1)
-                    send_to_inp = gr.Button("发送到局部重绘", scale=1)
-                    send_to_con = gr.Button("发送到ControlNet", scale=1)
-                with gr.Row():
-                    send_to_edit2 = gr.Button("发送到多图编辑1", scale=1)
-                    send_to_edit3 = gr.Button("发送到多图编辑2", scale=1)
-                    send_to_edit4 = gr.Button("发送到多图编辑3", scale=1)
-                    send_to_edit5 = gr.Button("发送到多图编辑4", scale=1)
+        with gr.TabItem("图片预处理"):
+            with gr.Row():
+                with gr.Column():
+                    image_cont = gr.Image(label="输入图片", type="pil", height=400)
+                    processor_cont = gr.Dropdown(label="预处理", choices=[
+                        "canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", 
+                        "lineart_anime", "lineart_coarse", "lineart_realistic", "mediapipe_face", 
+                        "mlsd", "normal_bae", "openpose", "openpose_face", 
+                        "openpose_faceonly", "openpose_full", "openpose_hand", "scribble_hed", 
+                        "scribble_pidinet", "shuffle", "softedge_hed", "softedge_hedsafe", 
+                        "softedge_pidinet", "softedge_pidsafe"])
+                    generate_button_cont = gr.Button("🎬 开始生成", variant='primary', scale=4)
+                with gr.Column():
+                    info_cont = gr.Textbox(label="提示信息", interactive=False)
+                    image_output_cont = gr.Image(label="生成结果", interactive=False)
+                    with gr.Row():
+                        send_to_i2i = gr.Button("发送到图生图", scale=1)
+                        send_to_inp = gr.Button("发送到局部重绘", scale=1)
+                        send_to_con = gr.Button("发送到ControlNet", scale=1)
+                    with gr.Row():
+                        send_to_edit2 = gr.Button("发送到多图编辑1", scale=1)
+                        send_to_edit3 = gr.Button("发送到多图编辑2", scale=1)
+                        send_to_edit4 = gr.Button("发送到多图编辑3", scale=1)
+                        send_to_edit5 = gr.Button("发送到多图编辑4", scale=1)
+        with gr.TabItem("Open Pose Editor"):
+            gr.HTML('<iframe src="https://zhuyu1997.github.io/open-pose-editor/" width="100%" height="800px" frameborder="0" style="border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);"></iframe>')
     with gr.TabItem("转换lora"):
         with gr.Row():
             with gr.Column():
@@ -1466,6 +1563,21 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
         inputs=[width, height], 
         outputs=[width, height, info]
     )
+    scale_1_5_button.click(
+        fn=scale_resolution_1_5,
+        inputs=[width, height],
+        outputs=[width, height, info]
+    )
+    save_example_button.click(
+        fn=lambda prompt: save_example(prompt, "t2i"),
+        inputs=[prompt],
+        outputs=[examples_dropdown, info]
+    )
+    examples_dropdown.change(
+        fn=lambda selected_example: selected_example,
+        inputs=[examples_dropdown],
+        outputs=[prompt]
+    )
     stop_button.click(
         fn=stop_generate, 
         inputs=[], 
@@ -1508,10 +1620,25 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
         inputs=[width_i2i, height_i2i], 
         outputs=[width_i2i, height_i2i, info_i2i]
     )
-    adjust_button_i2i.click(
+    scale_1_5_button_i2i.click(
+        fn=scale_resolution_1_5,
+        inputs=[width_i2i, height_i2i],
+        outputs=[width_i2i, height_i2i, info_i2i]
+    )
+    image_i2i.upload(
         fn=adjust_width_height, 
         inputs=[image_i2i], 
         outputs=[width_i2i, height_i2i, info_i2i]
+    )
+    save_example_button_i2i.click(
+        fn=lambda prompt: save_example(prompt, "i2i"),
+        inputs=[prompt_i2i],
+        outputs=[examples_dropdown_i2i, info_i2i]
+    )
+    examples_dropdown_i2i.change(
+        fn=lambda selected_example: selected_example,
+        inputs=[examples_dropdown_i2i],
+        outputs=[prompt_i2i]
     )
     stop_button_i2i.click(
         fn=stop_generate, 
@@ -1555,10 +1682,25 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
         inputs=[width_inp, height_inp], 
         outputs=[width_inp, height_inp, info_inp]
     )
-    adjust_button_inp.click(
+    scale_1_5_button_inp.click(
+        fn=scale_resolution_1_5,
+        inputs=[width_inp, height_inp],
+        outputs=[width_inp, height_inp, info_inp]
+    )
+    image_inp.upload(
         fn=adjust_width_height, 
         inputs=[image_inp], 
         outputs=[width_inp, height_inp, info_inp]
+    )
+    save_example_button_inp.click(
+        fn=lambda prompt: save_example(prompt, "inp"),
+        inputs=[prompt_inp],
+        outputs=[examples_dropdown_inp, info_inp]
+    )
+    examples_dropdown_inp.change(
+        fn=lambda selected_example: selected_example,
+        inputs=[examples_dropdown_inp],
+        outputs=[prompt_inp]
     )
     stop_button_inp.click(
         fn=stop_generate, 
@@ -1602,10 +1744,25 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
         inputs=[width_con, height_con], 
         outputs=[width_con, height_con, info_con]
     )
-    adjust_button_con.click(
+    scale_1_5_button_con.click(
+        fn=scale_resolution_1_5,
+        inputs=[width_con, height_con],
+        outputs=[width_con, height_con, info_con]
+    )
+    image_con.upload(
         fn=adjust_width_height, 
         inputs=[image_con], 
         outputs=[width_con, height_con, info_con]
+    )
+    save_example_button_con.click(
+        fn=lambda prompt: save_example(prompt, "con"),
+        inputs=[prompt_con],
+        outputs=[examples_dropdown_con, info_con]
+    )
+    examples_dropdown_con.change(
+        fn=lambda selected_example: selected_example,
+        inputs=[examples_dropdown_con],
+        outputs=[prompt_con]
     )
     stop_button_con.click(
         fn=stop_generate, 
@@ -1628,6 +1785,8 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
             image_editplus5,
             prompt_editplus2,
             negative_prompt_editplus2,
+            width_editplus2,
+            height_editplus2,
             num_inference_steps_editplus2,
             batch_images_editplus2,
             true_cfg_scale_editplus2, 
@@ -1648,6 +1807,31 @@ with gr.Blocks(theme=gr.themes.Base()) as demo:
         fn=enhance_prompt, 
         inputs=[prompt_editplus2, image_editplus2], 
         outputs=[prompt_editplus2, info_editplus2]
+    )
+    exchange_button_editplus2.click(
+        fn=exchange_width_height, 
+        inputs=[width_editplus2, height_editplus2], 
+        outputs=[width_editplus2, height_editplus2, info_editplus2]
+    )
+    scale_1_5_button_editplus2.click(
+        fn=scale_resolution_1_5,
+        inputs=[width_editplus2, height_editplus2],
+        outputs=[width_editplus2, height_editplus2, info_editplus2]
+    )
+    image_editplus2.upload(
+        fn=adjust_width_height_editplus2, 
+        inputs=[image_editplus2], 
+        outputs=[width_editplus2, height_editplus2, info_editplus2]
+    )
+    save_example_button_editplus2.click(
+        fn=lambda prompt: save_example(prompt, "editplus"),
+        inputs=[prompt_editplus2],
+        outputs=[examples_dropdown_editplus2, info_editplus2]
+    )
+    examples_dropdown_editplus2.change(
+        fn=lambda selected_example: selected_example,
+        inputs=[examples_dropdown_editplus2],
+        outputs=[prompt_editplus2]
     )
     stop_button_editplus2.click(
         fn=stop_generate, 

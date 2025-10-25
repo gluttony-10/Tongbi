@@ -6,11 +6,10 @@
 2.图生图
 3.局部重绘
 4.ControlNet
-5.图像编辑
-6.图像编辑（双图）
-7.局部编辑
-8.转换lora
-9.图片信息
+5.多图编辑
+6.ControlNet预处理
+7.转换lora
+8.图库
 
 一键包详见 [bilibili@十字鱼](https://space.bilibili.com/893892)
 
@@ -23,9 +22,8 @@
 ```
 git clone https://github.com/gluttony-10/Tongbi
 cd Tongbi
-conda create -n Tongbi python=3.10
+conda create -n Tongbi python=3.12
 conda activate Tongbi
-pip install git+https://github.com/huggingface/diffusers
 pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
 ```
 ## 下载模型

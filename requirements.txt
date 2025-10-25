@@ -1,6 +1,7 @@
-torch==2.7.0
+torch==2.7.1
 torchaudio
 torchvision
+git+https://github.com/huggingface/diffusers
 transformers==4.56.2
 huggingface_hub
 gradio
