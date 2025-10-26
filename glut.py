@@ -1373,8 +1373,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         outputs=[examples_dropdown, info]
     )
     examples_dropdown.change(
-        fn=lambda selected_example: selected_example,
-        inputs=[examples_dropdown],
+        fn=lambda selected_example, current_prompt: f"{current_prompt} {selected_example.strip()}",
+        inputs=[examples_dropdown, prompt],
         outputs=[prompt]
     )
     stop_button.click(
@@ -1435,8 +1435,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         outputs=[examples_dropdown_i2i, info_i2i]
     )
     examples_dropdown_i2i.change(
-        fn=lambda selected_example: selected_example,
-        inputs=[examples_dropdown_i2i],
+        fn=lambda selected_example, current_prompt: f"{current_prompt} {selected_example.strip()}",
+        inputs=[examples_dropdown_i2i, prompt_i2i],
         outputs=[prompt_i2i]
     )
     stop_button_i2i.click(
@@ -1497,8 +1497,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         outputs=[examples_dropdown_inp, info_inp]
     )
     examples_dropdown_inp.change(
-        fn=lambda selected_example: selected_example,
-        inputs=[examples_dropdown_inp],
+        fn=lambda selected_example, current_prompt: f"{current_prompt} {selected_example.strip()}",
+        inputs=[examples_dropdown_inp, prompt_inp],
         outputs=[prompt_inp]
     )
     stop_button_inp.click(
@@ -1559,8 +1559,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         outputs=[examples_dropdown_con, info_con]
     )
     examples_dropdown_con.change(
-        fn=lambda selected_example: selected_example,
-        inputs=[examples_dropdown_con],
+        fn=lambda selected_example, current_prompt: f"{current_prompt} {selected_example.strip()}",
+        inputs=[examples_dropdown_con, prompt_con],
         outputs=[prompt_con]
     )
     stop_button_con.click(
@@ -1628,8 +1628,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         outputs=[examples_dropdown_editplus2, info_editplus2]
     )
     examples_dropdown_editplus2.change(
-        fn=lambda selected_example: selected_example,
-        inputs=[examples_dropdown_editplus2],
+        fn=lambda selected_example, current_prompt: f"{current_prompt} {selected_example.strip()}",
+        inputs=[examples_dropdown_editplus2, prompt_editplus2],
         outputs=[prompt_editplus2]
     )
     stop_button_editplus2.click(
