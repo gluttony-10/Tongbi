@@ -1,10 +1,10 @@
-torch==2.7.1
+torch==2.8.0
 torchaudio
 torchvision
 git+https://github.com/huggingface/diffusers
-transformers==4.56.2
+transformers
 huggingface_hub
-gradio
+gradio==5.49.0
 numpy==1.26.4
 accelerate
 mmgp

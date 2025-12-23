@@ -86,8 +86,8 @@ if os.path.exists(CONFIG_FILE):
         config = json.load(f)
 #默认设置
 transformer_ = config.get("TRANSFORMER_DROPDOWN", "Qwen-Image-Lightning-4steps-V2.0-mmgp.safetensors")
-transformer_2 = config.get("TRANSFORMER_DROPDOWN2", "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-mmgp.safetensors")
-max_vram = float(config.get("MAX_VRAM", "0.8"))
+transformer_2 = config.get("TRANSFORMER_DROPDOWN2", "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-mmgp.safetensors")
+res_vram = float(config.get("RES_VRAM", "2000"))
 openai_base_url = config.get("OPENAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
 openai_api_key = config.get("OPENAI_API_KEY", "")
 model_name = config.get("MODEL_NAME", "GLM-4.1V-Thinking-Flash")
@@ -204,14 +204,14 @@ def load_and_merge_lora_weight_from_safetensors(
     return model
 
 
-def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram):
+def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, res_vram):
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
     global pipe, mode_loaded, transformer_loaded, lora_loaded, lora_loaded_weights, mmgp
-    max_vram = float(max_vram)
-    budgets = int(torch.cuda.get_device_properties(0).total_memory/1048576 * max_vram)
+    res_vram = float(res_vram)
+    budgets = int(torch.cuda.get_device_properties(0).total_memory/1048576 - res_vram)
     scheduler_config = {
             "base_image_seq_len": 256,
             "base_shift": math.log(3),  # We use shift=3 in distillation
@@ -245,9 +245,18 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
             forcedConfigPath=f"{model_id}/text_encoder/config.json",
         )
         # 加载transformer
+        # 转换mmgp模型，需要加载原始模型+lora，或者直接加载训练或融好的模型
+        # 方法一，加载原始diffusers模型
         #transformer = QwenImageTransformer2DModel.from_pretrained(model_id, subfolder="transformer", torch_dtype=dtype)
-        #transformer = QwenImageTransformer2DModel.from_single_file("Real-Qwen-Image-V1.safetensors", config=f"{model_id}/transformer/config.json", torch_dtype=dtype)
-        #transformer = load_and_merge_lora_weight_from_safetensors(transformer, "Qwen-Image-Lightning-4steps-V2.0.safetensors")
+        # 方法二，加载单文件模型
+        #transformer = QwenImageTransformer2DModel.from_single_file("models/Real-Qwen-Image-V1.safetensors", config=f"{model_id}/transformer/config.json", torch_dtype=dtype)
+        # 方法三，加载单文件模型
+        """transformer = QwenImageTransformer2DModel.from_config(f"{model_id}/transformer/config.json", torch_dtype=dtype)
+        state_dict = safetensors.torch.load_file("Real-Qwen-Image-V1.safetensors")
+        transformer.load_state_dict(state_dict)"""
+        # 加载加速lora
+        #transformer = load_and_merge_lora_weight_from_safetensors(transformer, "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-fp32.safetensors")
+        # Tongbi中的加载mmgp模型方式，转换时请注释掉
         if "mmgp" in transformer_dropdown:
             transformer = offload.fast_load_transformers_model(
                 f"models/transformer/{transformer_dropdown}",
@@ -296,15 +305,9 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram
             pipe.set_progress_bar_config(disable=None)
         # 加载LoRA并配置显存
         load_lora(lora_dropdown, lora_weights)
-        """mmgp = offload.all(
+        mmgp = offload.all(
             pipe, 
             pinnedMemory= "transformer",
-            budgets={'*': budgets}, 
-            compile=True if args.compile else False,
-        )"""
-        mmgp = offload.profile(
-            pipe, 
-            profile_type.LowRAM_HighVRAM, 
             budgets={'*': budgets}, 
             extraModelsToQuantize = ["text_encoder"],
             compile=True if args.compile else False,
@@ -490,20 +493,18 @@ def adjust_width_height_editplus2(image):
     return int(calculated_width), int(calculated_height), "✅ 根据图片调整宽高"
 
 
+def calculate_dimensions(target_area, ratio):
+    width = math.sqrt(target_area * ratio)
+    height = width / ratio
+    width = round(width / 32) * 32
+    height = round(height / 32) * 32
+    return width, height
+
+
 def stop_generate():
     global stop_generation
     stop_generation = True
     return "🛑 等待生成中止"
-
-
-def calculate_dimensions(target_area, ratio):
-    width = math.sqrt(target_area * ratio)
-    height = width / ratio
-
-    width = round(width / 32) * 32
-    height = round(height / 32) * 32
-
-    return width, height
 
 
 def _generate_common(
@@ -519,7 +520,7 @@ def _generate_common(
     transformer_dropdown, 
     lora_dropdown, 
     lora_weights, 
-    max_vram, 
+    res_vram, 
     image=None, 
     mask_image=None, 
     strength=None,
@@ -551,7 +552,7 @@ def _generate_common(
     if (mode != mode_loaded or prompt_cache != prompt or negative_prompt_cache != negative_prompt or 
         transformer_loaded != transformer_dropdown or lora_loaded != lora_dropdown or
           lora_loaded_weights != lora_weights or image_loaded!=image):
-        load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, max_vram)
+        load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, res_vram)
         prompt_cache, negative_prompt_cache, image_loaded = prompt, negative_prompt, image
         if mode == "t2i" or mode == "i2i" or mode == "inp" or mode == "con":
             prompt_embeds, prompt_embeds_mask = pipe.encode_prompt(prompt)
@@ -669,7 +670,7 @@ def _generate_common(
 #, progress=gr.Progress(track_tqdm=True)
 def generate_t2i(prompt, negative_prompt, width, height, num_inference_steps, 
                  batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram):
+                 lora_dropdown, lora_weights, res_vram):
     if "ModelScope" in transformer_dropdown:
         yield from modelscope_generate(
             mode="t2i_ms",
@@ -695,13 +696,13 @@ def generate_t2i(prompt, negative_prompt, width, height, num_inference_steps,
             transformer_dropdown=transformer_dropdown,
             lora_dropdown=lora_dropdown,
             lora_weights=lora_weights,
-            max_vram=max_vram
+            res_vram=res_vram
         )
 
 
 def generate_i2i(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram):
+                 lora_dropdown, lora_weights, res_vram):
     image = load_image(image)
     yield from _generate_common(
         mode="i2i",
@@ -718,13 +719,13 @@ def generate_i2i(image, prompt, negative_prompt, width, height, num_inference_st
         transformer_dropdown=transformer_dropdown,
         lora_dropdown=lora_dropdown,
         lora_weights=lora_weights,
-        max_vram=max_vram
+        res_vram=res_vram
     )
 
 
 def generate_inp(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                 lora_dropdown, lora_weights, max_vram):
+                 lora_dropdown, lora_weights, res_vram):
     # 处理蒙版图像
     mask_image = image["layers"][0]
     mask_image = mask_image .convert("RGBA")
@@ -753,13 +754,13 @@ def generate_inp(image, prompt, negative_prompt, width, height, num_inference_st
         transformer_dropdown=transformer_dropdown,
         lora_dropdown=lora_dropdown,
         lora_weights=lora_weights,
-        max_vram=max_vram
+        res_vram=res_vram
     )
 
 
 def generate_con(image, prompt, negative_prompt, width, height, num_inference_steps,
                  strength, batch_images, true_cfg_scale, seed_param, transformer_dropdown, 
-                 lora_dropdown, lora_weights, max_vram):
+                 lora_dropdown, lora_weights, res_vram):
     image = load_image(image)
     yield from _generate_common(
         mode="con",
@@ -776,13 +777,13 @@ def generate_con(image, prompt, negative_prompt, width, height, num_inference_st
         transformer_dropdown=transformer_dropdown,
         lora_dropdown=lora_dropdown,
         lora_weights=lora_weights,
-        max_vram=max_vram
+        res_vram=res_vram
     )
 
 
 def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_editplus5, prompt, negative_prompt, width, height, num_inference_steps,
                   batch_images, true_cfg_scale, seed_param, transformer_dropdown,
-                  lora_dropdown, lora_weights, max_vram):
+                  lora_dropdown, lora_weights, res_vram):
     if "ModelScope" in transformer_dropdown:
         yield from modelscope_generate(
             mode="edit_ms",
@@ -824,7 +825,7 @@ def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_
             transformer_dropdown=transformer_dropdown, 
             lora_dropdown=lora_dropdown,
             lora_weights=lora_weights,
-            max_vram=max_vram
+            res_vram=res_vram
         )
 
 
@@ -921,9 +922,9 @@ def load_image_info(selected_index, gallery):
     return gr.update(value=info) 
 
 
-def save_openai_config(transformer_dropdown, transformer_dropdown2, max_vram_tb, base_url_tb, api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb):
-    global max_vram, base_url, api_key, model_name, temperature, top_p, max_tokens, modelscope_api_key, openai_base_url, openai_api_key
-    max_vram, base_url, api_key, model_name, temperature, top_p, max_tokens, modelscope_api_key = max_vram_tb, base_url_tb, api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb
+def save_openai_config(transformer_dropdown, transformer_dropdown2, res_vram_tb, base_url_tb, api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb):
+    global res_vram, base_url, api_key, model_name, temperature, top_p, max_tokens, modelscope_api_key, openai_base_url, openai_api_key
+    res_vram, base_url, api_key, model_name, temperature, top_p, max_tokens, modelscope_api_key = res_vram_tb, base_url_tb, api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb
     openai_base_url, openai_api_key = base_url_tb, api_key_tb
     
     # 更新prompt_enhancer模块中的配置
@@ -940,7 +941,7 @@ def save_openai_config(transformer_dropdown, transformer_dropdown2, max_vram_tb,
     config = {
         "TRANSFORMER_DROPDOWN": transformer_dropdown,
         "TRANSFORMER_DROPDOWN2": transformer_dropdown2,
-        "MAX_VRAM": max_vram_tb,
+        "RES_VRAM": res_vram_tb,
         "OPENAI_BASE_URL": base_url_tb,
         "OPENAI_API_KEY": api_key_tb,
         "MODEL_NAME": model_name_tb,
@@ -953,7 +954,7 @@ def save_openai_config(transformer_dropdown, transformer_dropdown2, max_vram_tb,
         json.dump(config, f, ensure_ascii=False, indent=2)
     return "✅ 配置已保存到本地文件"
 
-# 解决冲突端口（感谢licyk提供的代码~）
+# 解决冲突端口（感谢licyk酱提供的代码~）
 def find_port(port: int) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
@@ -1069,7 +1070,7 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
             with gr.Row():
                 transformer_dropdown = gr.Dropdown(label="QI模型", info="存放基础模型到models/transformer，仅支持mmgp转化版本", choices=transformer_choices, value=transformer_)
                 transformer_dropdown2 = gr.Dropdown(label="QIEP模型", info="存放编辑模型到models/transformer，仅支持mmgp转化版本", choices=transformer_choices2, value=transformer_2)
-                lora_dropdown = gr.Dropdown(label="LoRA模型", info="存放LoRA模型到models/lora", choices=lora_choices, multiselect=True)
+                lora_dropdown = gr.Dropdown(label="LoRA模型", info="存放LoRA模型到models/lora，可多选", choices=lora_choices, multiselect=True)
                 lora_weights = gr.Textbox(label="LoRA权重", info="Lora权重，多个权重请用英文逗号隔开。例如：0.8,0.5,0.2", value="")
     with gr.TabItem("文生图"):
         with gr.Row():
@@ -1305,7 +1306,7 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
     with gr.TabItem("设置"):
         with gr.Row():
             with gr.Column():
-                max_vram_tb = gr.Slider(label="最大显存使用比例", minimum=0.1, maximum=1, step=0.01, value=max_vram)
+                res_vram_tb = gr.Slider(label="保留显存", info="单位MB，数值越大，显存占用越小，速度越慢", minimum=0, maximum=80000, step=1, value=res_vram)
                 with gr.Accordion("多模态API设置", open=True):
                     openai_base_url_tb = gr.Textbox(label="BASE URL", info="请输入BASE URL，例如：https://open.bigmodel.cn/api/paas/v4", value=openai_base_url)
                     openai_api_key_tb = gr.Textbox(label="API KEY", info="请输入API KEY，暗文显示", value=openai_api_key, type="password")
@@ -1348,7 +1349,7 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
             transformer_dropdown,
             lora_dropdown, 
             lora_weights,
-            max_vram_tb,
+            res_vram_tb,
         ],
         outputs = [image_output, info]
     )
@@ -1400,7 +1401,7 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
             transformer_dropdown,
             lora_dropdown, 
             lora_weights,
-            max_vram_tb,
+            res_vram_tb,
         ],
         outputs = [image_output_i2i, info_i2i]
     )
@@ -1462,7 +1463,7 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
             transformer_dropdown,
             lora_dropdown, 
             lora_weights,
-            max_vram_tb,
+            res_vram_tb,
         ],
         outputs = [image_output_inp, info_inp]
     )
@@ -1524,7 +1525,7 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
             transformer_dropdown,
             lora_dropdown, 
             lora_weights,
-            max_vram_tb,
+            res_vram_tb,
         ],
         outputs = [image_output_con, info_con]
     )
@@ -1593,7 +1594,7 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
             transformer_dropdown2,
             lora_dropdown, 
             lora_weights,
-            max_vram_tb,
+            res_vram_tb,
         ],
         outputs = [image_output_editplus2, info_editplus2]
     )
@@ -1749,7 +1750,7 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
     # 设置
     save_button.click(
         fn=save_openai_config,
-        inputs=[transformer_dropdown, transformer_dropdown2, max_vram_tb, openai_base_url_tb, openai_api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb],
+        inputs=[transformer_dropdown, transformer_dropdown2, res_vram_tb, openai_base_url_tb, openai_api_key_tb, model_name_tb, temperature_tb, top_p_tb, max_tokens_tb, modelscope_api_key_tb],
         outputs=[info_config],
     )
 
