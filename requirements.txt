@@ -1,7 +1,7 @@
 torch==2.8.0
 torchaudio
 torchvision
-git+https://github.com/huggingface/diffusers
+#git+https://github.com/huggingface/diffusers
 transformers
 huggingface_hub
 gradio==5.49.0
@@ -12,5 +12,7 @@ peft
 openai
 modelscope
 controlnet-aux
-mediapipe
+mediapipe==0.10.21
 timm
+https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.4.11/flash_attn-2.8.3+cu128torch2.8-cp312-cp312-linux_x86_64.whl ; sys_platform != 'win32'
+https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.4.10/flash_attn-2.8.2+cu128torch2.8-cp312-cp312-win_amd64.whl ; sys_platform == 'win32'

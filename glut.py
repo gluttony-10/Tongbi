@@ -52,8 +52,8 @@ if torch.cuda.is_available():
         print(f'\033[32m支持BF16\033[0m')
         dtype = torch.bfloat16
     else:
-        print(f'\033[32m不支持BF16，仅支持FP16\033[0m')
-        dtype = torch.float16
+        print(f'\033[32m不支持BF16，使用FP32\033[0m')
+        dtype = torch.float32
 else:
     print(f'\033[32mCUDA不可用，请检查\033[0m')
     device = "cpu"
@@ -85,12 +85,12 @@ if os.path.exists(CONFIG_FILE):
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         config = json.load(f)
 #默认设置
-transformer_ = config.get("TRANSFORMER_DROPDOWN", "Qwen-Image-Lightning-4steps-V2.0-mmgp.safetensors")
+transformer_ = config.get("TRANSFORMER_DROPDOWN", "Qwen-Image-2512-Lightning-4steps-V1.0-mmgp.safetensors")
 transformer_2 = config.get("TRANSFORMER_DROPDOWN2", "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-mmgp.safetensors")
-res_vram = float(config.get("RES_VRAM", "2000"))
+res_vram = float(config.get("RES_VRAM", "1000"))
 openai_base_url = config.get("OPENAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
 openai_api_key = config.get("OPENAI_API_KEY", "")
-model_name = config.get("MODEL_NAME", "GLM-4.1V-Thinking-Flash")
+model_name = config.get("MODEL_NAME", "GLM-4.6V-Flash")
 temperature = float(config.get("TEMPERATURE", "0.8"))
 top_p = float(config.get("TOP_P", "0.6"))
 max_tokens = float(config.get("MAX_TOKENS", "16384"))
@@ -211,7 +211,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, res_vram
         torch.cuda.ipc_collect()
     global pipe, mode_loaded, transformer_loaded, lora_loaded, lora_loaded_weights, mmgp
     res_vram = float(res_vram)
-    budgets = int(torch.cuda.get_device_properties(0).total_memory/1048576 - res_vram)
+    budgets = int(torch.cuda.get_device_properties(0).free_memory/1048576 - res_vram)
     scheduler_config = {
             "base_image_seq_len": 256,
             "base_shift": math.log(3),  # We use shift=3 in distillation
@@ -255,7 +255,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, res_vram
         state_dict = safetensors.torch.load_file("Real-Qwen-Image-V1.safetensors")
         transformer.load_state_dict(state_dict)"""
         # 加载加速lora
-        #transformer = load_and_merge_lora_weight_from_safetensors(transformer, "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-fp32.safetensors")
+        #transformer = load_and_merge_lora_weight_from_safetensors(transformer, "Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors")
         # Tongbi中的加载mmgp模型方式，转换时请注释掉
         if "mmgp" in transformer_dropdown:
             transformer = offload.fast_load_transformers_model(
@@ -307,12 +307,17 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, res_vram
         load_lora(lora_dropdown, lora_weights)
         mmgp = offload.all(
             pipe, 
-            pinnedMemory= "transformer",
+            pinnedMemory = ["text_encoder", "transformer"] if mem.total/1073741824 > 127 else "transformer",
             budgets={'*': budgets}, 
             extraModelsToQuantize = ["text_encoder"],
+            #quantizeTransformer = False,
             compile=True if args.compile else False,
         )
         #offload.save_model(pipe.transformer, "models/transformer-mmgp.safetensors")
+        if torch.cuda.get_device_capability()[0] >= 8:
+            pipe.transformer.set_attention_backend("flash")
+        else:
+            pipe.transformer.set_attention_backend("native")
 
 
 def load_lora(lora_dropdown, lora_weights):
