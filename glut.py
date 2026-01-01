@@ -211,7 +211,9 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, res_vram
         torch.cuda.ipc_collect()
     global pipe, mode_loaded, transformer_loaded, lora_loaded, lora_loaded_weights, mmgp
     res_vram = float(res_vram)
-    budgets = int(torch.cuda.get_device_properties(0).free_memory/1048576 - res_vram)
+    # 使用 mem_get_info 获取可用显存（单位：字节）
+    free_memory, _ = torch.cuda.mem_get_info(0)
+    budgets = int(free_memory / 1048576 - res_vram)
     scheduler_config = {
             "base_image_seq_len": 256,
             "base_shift": math.log(3),  # We use shift=3 in distillation
