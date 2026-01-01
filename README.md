@@ -14,10 +14,9 @@
 一键包详见 [bilibili@十字鱼](https://space.bilibili.com/893892)
 
 ## 使用需求
-1.显卡支持BF16
+1.显存大于4G（4G显存需要配合核显使用）
 
-2.显存大于4G
-
+2.显卡最好支持BF16。如果不支持将使用FP32精度，显存占用增大。
 ## 安装依赖
 ```
 git clone https://github.com/gluttony-10/Tongbi
