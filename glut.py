@@ -1178,40 +1178,6 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
                 info_inp = gr.Textbox(label="提示信息", interactive=False)
                 image_output_inp = gr.Gallery(label="生成结果", interactive=False)
                 stop_button_inp = gr.Button("中止生成", variant="stop")
-    with gr.TabItem("ControlNet"):
-        with gr.Row():
-            with gr.Column():
-                image_con = gr.Image(label="输入图片", type="pil", height=400)
-                prompt_con = gr.Textbox(label="提示词", value="超清，4K，电影级构图，")
-                negative_prompt_con = gr.Textbox(label="负面提示词", value="")
-                with gr.Row():
-                    generate_button_con = gr.Button("🎬 开始生成", variant='primary', scale=4)
-                    enhance_button_con = gr.Button("提示词增强", scale=1)
-                    reverse_button_con = gr.Button("反推提示词", scale=1)
-                    save_example_button_con = gr.Button("💾", elem_classes="icon-btn")
-                with gr.Accordion("参数设置", open=True):
-                    gr.Markdown("上传图像后分辨率自动计算")
-                    with gr.Row():
-                        width_con = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1328)
-                        height_con = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
-                    with gr.Row():
-                        exchange_button_con = gr.Button("🔄 交换宽高")
-                        scale_1_5_button_con = gr.Button("1.5倍分辨率")
-                    strength_con = gr.Slider(label="strength（推荐0.8~1）", minimum=0, maximum=1, step=0.01, value=1.0)
-                    batch_images_con = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
-                    num_inference_steps_con = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
-                    true_cfg_scale_con = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
-                    seed_param_con = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
-                    examples_dropdown_con = gr.Dropdown(
-                        label="提示词库", 
-                        choices=load_examples("con"),
-                        interactive=True,
-                        scale=5
-                    )
-            with gr.Column():
-                info_con = gr.Textbox(label="提示信息", interactive=False)
-                image_output_con = gr.Gallery(label="生成结果", interactive=False)
-                stop_button_con = gr.Button("中止生成", variant="stop")
     with gr.TabItem("多图编辑"):
         with gr.Row():
             with gr.Column():
@@ -1275,7 +1241,6 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
                     with gr.Row():
                         send_to_i2i = gr.Button("发送到图生图", scale=1)
                         send_to_inp = gr.Button("发送到局部重绘", scale=1)
-                        send_to_con = gr.Button("发送到ControlNet", scale=1)
                     with gr.Row():
                         send_to_edit2 = gr.Button("发送到多图编辑1", scale=1)
                         send_to_edit3 = gr.Button("发送到多图编辑2", scale=1)
@@ -1304,7 +1269,6 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         with gr.Row():
             send_to_i2i_gallery = gr.Button("发送到图生图")
             send_to_inp_gallery = gr.Button("发送到局部重绘")
-            send_to_con_gallery = gr.Button("发送到ControlNet")
             send_to_edit2_gallery = gr.Button("发送到多图编辑1")
             send_to_edit3_gallery = gr.Button("发送到多图编辑2")
             send_to_edit4_gallery = gr.Button("发送到多图编辑3")
@@ -1514,68 +1478,6 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         inputs=[], 
         outputs=[info_inp]
     )
-    # ControlNet
-    gr.on(
-        triggers=[generate_button_con.click, prompt_con.submit, negative_prompt_con.submit],
-        fn = generate_con,
-        inputs = [
-            image_con,
-            prompt_con,
-            negative_prompt_con,
-            width_con,
-            height_con,
-            num_inference_steps_con,
-            strength_con,
-            batch_images_con,
-            true_cfg_scale_con, 
-            seed_param_con,
-            transformer_dropdown,
-            lora_dropdown, 
-            lora_weights,
-            res_vram_tb,
-        ],
-        outputs = [image_output_con, info_con]
-    )
-    enhance_button_con.click(
-        fn=enhance_prompt, 
-        inputs=[prompt_con], 
-        outputs=[prompt_con, info_con]
-    )
-    reverse_button_con.click(
-        fn=enhance_prompt, 
-        inputs=[prompt_con, image_con], 
-        outputs=[prompt_con, info_con]
-    )
-    exchange_button_con.click(
-        fn=exchange_width_height, 
-        inputs=[width_con, height_con], 
-        outputs=[width_con, height_con, info_con]
-    )
-    scale_1_5_button_con.click(
-        fn=scale_resolution_1_5,
-        inputs=[width_con, height_con],
-        outputs=[width_con, height_con, info_con]
-    )
-    image_con.upload(
-        fn=adjust_width_height, 
-        inputs=[image_con], 
-        outputs=[width_con, height_con, info_con]
-    )
-    save_example_button_con.click(
-        fn=lambda prompt: save_example(prompt, "con"),
-        inputs=[prompt_con],
-        outputs=[examples_dropdown_con, info_con]
-    )
-    examples_dropdown_con.change(
-        fn=lambda selected_example, current_prompt: f"{current_prompt} {selected_example.strip()}",
-        inputs=[examples_dropdown_con, prompt_con],
-        outputs=[prompt_con]
-    )
-    stop_button_con.click(
-        fn=stop_generate, 
-        inputs=[], 
-        outputs=[info_con]
-    )
     # 多图编辑
     reference_count.change(
         fn=change_reference_count,
@@ -1664,11 +1566,6 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         inputs=[image_output_cont],
         outputs=[image_inp]
     )
-    send_to_con.click(
-        fn=lambda x: x,
-        inputs=[image_output_cont],
-        outputs=[image_con]
-    )
     send_to_edit2.click(
         fn=lambda x: x,
         inputs=[image_output_cont],
@@ -1724,11 +1621,6 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         inputs=[selected_index, gallery],
         outputs=[image_inp]
     )
-    send_to_con_gallery.click(
-        fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
-        inputs=[selected_index, gallery],
-        outputs=[image_con]
-    )
     send_to_edit2_gallery.click(
         fn=lambda idx, gallery: Image.open(gallery[idx][0]) if idx >= 0 and idx < len(gallery) else None,
         inputs=[selected_index, gallery],
@@ -1769,4 +1661,6 @@ if __name__ == "__main__":
         share=args.share, 
         mcp_server=args.mcp_server,
         inbrowser=True,
+        debug=True,
+        show_api=False,
     )
