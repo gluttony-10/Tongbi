@@ -1661,6 +1661,4 @@ if __name__ == "__main__":
         share=args.share, 
         mcp_server=args.mcp_server,
         inbrowser=True,
-        debug=True,
-        show_api=False,
     )
