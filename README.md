@@ -2,14 +2,13 @@
 拿日月、缩千山、辨休咎、乾坤摩弄。
 
 目前支持的功能有：
-1.文生图
-2.图生图
-3.局部重绘
-4.ControlNet
-5.多图编辑
-6.ControlNet预处理
-7.转换lora
-8.图库
+文生图
+图生图
+局部重绘
+多图编辑
+ControlNet预处理
+转换lora
+图库
 
 一键包详见 [bilibili@十字鱼](https://space.bilibili.com/893892)
 
@@ -23,7 +22,9 @@ git clone https://github.com/gluttony-10/Tongbi
 cd Tongbi
 conda create -n Tongbi python=3.12
 conda activate Tongbi
+pip install git+https://github.com/huggingface/diffusers
 pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+#pip install flash_attn --no-build-isolation
 ```
 ## 下载模型
 ```
