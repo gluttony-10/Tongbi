@@ -123,7 +123,8 @@ def initialize_examples_file():
         "i2i": ["选择保存过的提示词"],
         "inp": ["选择保存过的提示词"],
         "con": ["选择保存过的提示词"],
-        "editplus": ["选择保存过的提示词"]
+        "editplus": ["选择保存过的提示词"],
+        "camera": ["选择保存过的提示词"]
     }
     
     if not os.path.exists(EXAMPLES_FILE):
@@ -508,6 +509,585 @@ def calculate_dimensions(target_area, ratio):
     return width, height
 
 
+# --- Camera Control Functions ---
+
+# Azimuth mappings (8 positions)
+AZIMUTH_MAP = {
+    0: "front view",
+    45: "front-right quarter view",
+    90: "right side view",
+    135: "back-right quarter view",
+    180: "back view",
+    225: "back-left quarter view",
+    270: "left side view",
+    315: "front-left quarter view"
+}
+
+# Elevation mappings (4 positions)
+ELEVATION_MAP = {
+    -30: "low-angle shot",
+    0: "eye-level shot",
+    30: "elevated shot",
+    60: "high-angle shot"
+}
+
+# Distance mappings (3 positions)
+DISTANCE_MAP = {
+    0.6: "close-up",
+    1.0: "medium shot",
+    1.8: "wide shot"
+}
+
+
+def snap_to_nearest(value, options):
+    """Snap a value to the nearest option in a list."""
+    return min(options, key=lambda x: abs(x - value))
+
+
+def build_camera_prompt(azimuth: float, elevation: float, distance: float) -> str:
+    """
+    Build a camera prompt from azimuth, elevation, and distance values.
+    
+    Args:
+        azimuth: Horizontal rotation in degrees (0-360)
+        elevation: Vertical angle in degrees (-30 to 60)
+        distance: Distance factor (0.6 to 1.8)
+    
+    Returns:
+        Formatted prompt string for the LoRA
+    """
+    # Snap to nearest valid values
+    azimuth_snapped = snap_to_nearest(azimuth, list(AZIMUTH_MAP.keys()))
+    elevation_snapped = snap_to_nearest(elevation, list(ELEVATION_MAP.keys()))
+    distance_snapped = snap_to_nearest(distance, list(DISTANCE_MAP.keys()))
+    
+    azimuth_name = AZIMUTH_MAP[azimuth_snapped]
+    elevation_name = ELEVATION_MAP[elevation_snapped]
+    distance_name = DISTANCE_MAP[distance_snapped]
+    
+    return f"<sks> {azimuth_name} {elevation_name} {distance_name}"
+
+
+def update_dimensions_on_upload_camera(image):
+    """Compute recommended dimensions preserving aspect ratio for camera control."""
+    if image is None:
+        return 1024, 1024, "✅ 根据图片调整宽高"
+    
+    image_width, image_height = image.size
+    vae_width, vae_height = calculate_dimensions(1024*1024, image_width / image_height)
+    calculated_height = vae_height // 32 * 32
+    calculated_width = vae_width // 32 * 32
+    return int(calculated_width), int(calculated_height), "✅ 根据图片调整宽高"
+
+
+# --- 3D Camera Control Component ---
+class CameraControl3D(gr.HTML):
+    """
+    A 3D camera control component using Three.js.
+    Outputs: { azimuth: number, elevation: number, distance: number }
+    Accepts imageUrl prop to display user's uploaded image on the plane.
+    """
+    def __init__(self, value=None, imageUrl=None, **kwargs):
+        if value is None:
+            value = {"azimuth": 0, "elevation": 0, "distance": 1.0}
+        
+        html_template = """
+        <div id="camera-control-wrapper" style="width: 100%; height: 450px; position: relative; background: #1a1a1a; border-radius: 12px; overflow: hidden;">
+            <div id="prompt-overlay" style="position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 8px 16px; border-radius: 8px; font-family: monospace; font-size: 12px; color: #00ff88; white-space: nowrap; z-index: 10;"></div>
+        </div>
+        """
+        
+        js_on_load = """
+        (() => {
+            const wrapper = element.querySelector('#camera-control-wrapper');
+            const promptOverlay = element.querySelector('#prompt-overlay');
+            
+            // Wait for THREE to load
+            const initScene = () => {
+                if (typeof THREE === 'undefined') {
+                    setTimeout(initScene, 100);
+                    return;
+                }
+                
+                // Scene setup
+                const scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x1a1a1a);
+                
+                const camera = new THREE.PerspectiveCamera(50, wrapper.clientWidth / wrapper.clientHeight, 0.1, 1000);
+                camera.position.set(4.5, 3, 4.5);
+                camera.lookAt(0, 0.75, 0);
+                
+                const renderer = new THREE.WebGLRenderer({ antialias: true });
+                renderer.setSize(wrapper.clientWidth, wrapper.clientHeight);
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+                wrapper.insertBefore(renderer.domElement, promptOverlay);
+                
+                // Lighting
+                scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+                const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+                dirLight.position.set(5, 10, 5);
+                scene.add(dirLight);
+                
+                // Grid
+                scene.add(new THREE.GridHelper(8, 16, 0x333333, 0x222222));
+                
+                // Constants - reduced distances for tighter framing
+                const CENTER = new THREE.Vector3(0, 0.75, 0);
+                const BASE_DISTANCE = 1.6;
+                const AZIMUTH_RADIUS = 2.4;
+                const ELEVATION_RADIUS = 1.8;
+                
+                // State
+                let azimuthAngle = props.value?.azimuth || 0;
+                let elevationAngle = props.value?.elevation || 0;
+                let distanceFactor = props.value?.distance || 1.0;
+                
+                // Mappings - reduced wide shot multiplier
+                const azimuthSteps = [0, 45, 90, 135, 180, 225, 270, 315];
+                const elevationSteps = [-30, 0, 30, 60];
+                const distanceSteps = [0.6, 1.0, 1.4];
+                
+                const azimuthNames = {
+                    0: 'front view', 45: 'front-right quarter view', 90: 'right side view',
+                    135: 'back-right quarter view', 180: 'back view', 225: 'back-left quarter view',
+                    270: 'left side view', 315: 'front-left quarter view'
+                };
+                const elevationNames = { '-30': 'low-angle shot', '0': 'eye-level shot', '30': 'elevated shot', '60': 'high-angle shot' };
+                const distanceNames = { '0.6': 'close-up', '1': 'medium shot', '1.4': 'wide shot' };
+                
+                function snapToNearest(value, steps) {
+                    return steps.reduce((prev, curr) => Math.abs(curr - value) < Math.abs(prev - value) ? curr : prev);
+                }
+                
+                // Create placeholder texture (smiley face)
+                function createPlaceholderTexture() {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 256;
+                    canvas.height = 256;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#3a3a4a';
+                    ctx.fillRect(0, 0, 256, 256);
+                    ctx.fillStyle = '#ffcc99';
+                    ctx.beginPath();
+                    ctx.arc(128, 128, 80, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#333';
+                    ctx.beginPath();
+                    ctx.arc(100, 110, 10, 0, Math.PI * 2);
+                    ctx.arc(156, 110, 10, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = '#333';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(128, 130, 35, 0.2, Math.PI - 0.2);
+                    ctx.stroke();
+                    return new THREE.CanvasTexture(canvas);
+                }
+                
+                // Target image plane
+                let currentTexture = createPlaceholderTexture();
+                const planeMaterial = new THREE.MeshBasicMaterial({ map: currentTexture, side: THREE.DoubleSide });
+                let targetPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), planeMaterial);
+                targetPlane.position.copy(CENTER);
+                scene.add(targetPlane);
+                
+                // Function to update texture from image URL
+                function updateTextureFromUrl(url) {
+                    if (!url) {
+                        // Reset to placeholder
+                        planeMaterial.map = createPlaceholderTexture();
+                        planeMaterial.needsUpdate = true;
+                        // Reset plane to square
+                        scene.remove(targetPlane);
+                        targetPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), planeMaterial);
+                        targetPlane.position.copy(CENTER);
+                        scene.add(targetPlane);
+                        return;
+                    }
+                    
+                    const loader = new THREE.TextureLoader();
+                    loader.crossOrigin = 'anonymous';
+                    loader.load(url, (texture) => {
+                        texture.minFilter = THREE.LinearFilter;
+                        texture.magFilter = THREE.LinearFilter;
+                        planeMaterial.map = texture;
+                        planeMaterial.needsUpdate = true;
+                        
+                        // Adjust plane aspect ratio to match image
+                        const img = texture.image;
+                        if (img && img.width && img.height) {
+                            const aspect = img.width / img.height;
+                            const maxSize = 1.5;
+                            let planeWidth, planeHeight;
+                            if (aspect > 1) {
+                                planeWidth = maxSize;
+                                planeHeight = maxSize / aspect;
+                            } else {
+                                planeHeight = maxSize;
+                                planeWidth = maxSize * aspect;
+                            }
+                            scene.remove(targetPlane);
+                            targetPlane = new THREE.Mesh(
+                                new THREE.PlaneGeometry(planeWidth, planeHeight),
+                                planeMaterial
+                            );
+                            targetPlane.position.copy(CENTER);
+                            scene.add(targetPlane);
+                        }
+                    }, undefined, (err) => {
+                        console.error('Failed to load texture:', err);
+                    });
+                }
+                
+                // Check for initial imageUrl
+                if (props.imageUrl) {
+                    updateTextureFromUrl(props.imageUrl);
+                }
+                
+                // Camera model
+                const cameraGroup = new THREE.Group();
+                const bodyMat = new THREE.MeshStandardMaterial({ color: 0x6699cc, metalness: 0.5, roughness: 0.3 });
+                const body = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.22, 0.38), bodyMat);
+                cameraGroup.add(body);
+                const lens = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.09, 0.11, 0.18, 16),
+                    new THREE.MeshStandardMaterial({ color: 0x6699cc, metalness: 0.5, roughness: 0.3 })
+                );
+                lens.rotation.x = Math.PI / 2;
+                lens.position.z = 0.26;
+                cameraGroup.add(lens);
+                scene.add(cameraGroup);
+                
+                // GREEN: Azimuth ring
+                const azimuthRing = new THREE.Mesh(
+                    new THREE.TorusGeometry(AZIMUTH_RADIUS, 0.04, 16, 64),
+                    new THREE.MeshStandardMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 0.3 })
+                );
+                azimuthRing.rotation.x = Math.PI / 2;
+                azimuthRing.position.y = 0.05;
+                scene.add(azimuthRing);
+                
+                const azimuthHandle = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.18, 16, 16),
+                    new THREE.MeshStandardMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 0.5 })
+                );
+                azimuthHandle.userData.type = 'azimuth';
+                scene.add(azimuthHandle);
+                
+                // PINK: Elevation arc
+                const arcPoints = [];
+                for (let i = 0; i <= 32; i++) {
+                    const angle = THREE.MathUtils.degToRad(-30 + (90 * i / 32));
+                    arcPoints.push(new THREE.Vector3(-0.8, ELEVATION_RADIUS * Math.sin(angle) + CENTER.y, ELEVATION_RADIUS * Math.cos(angle)));
+                }
+                const arcCurve = new THREE.CatmullRomCurve3(arcPoints);
+                const elevationArc = new THREE.Mesh(
+                    new THREE.TubeGeometry(arcCurve, 32, 0.04, 8, false),
+                    new THREE.MeshStandardMaterial({ color: 0xff69b4, emissive: 0xff69b4, emissiveIntensity: 0.3 })
+                );
+                scene.add(elevationArc);
+                
+                const elevationHandle = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.18, 16, 16),
+                    new THREE.MeshStandardMaterial({ color: 0xff69b4, emissive: 0xff69b4, emissiveIntensity: 0.5 })
+                );
+                elevationHandle.userData.type = 'elevation';
+                scene.add(elevationHandle);
+                
+                // YELLOW: Distance line & handle
+                const distanceLineGeo = new THREE.BufferGeometry();
+                const distanceLine = new THREE.Line(distanceLineGeo, new THREE.LineBasicMaterial({ color: 0xffff00 }));
+                scene.add(distanceLine);
+                
+                const distanceHandle = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.18, 16, 16),
+                    new THREE.MeshStandardMaterial({ color: 0xffff00, emissive: 0xffff00, emissiveIntensity: 0.5 })
+                );
+                distanceHandle.userData.type = 'distance';
+                scene.add(distanceHandle);
+                
+                function updatePositions() {
+                    const distance = BASE_DISTANCE * distanceFactor;
+                    const azRad = THREE.MathUtils.degToRad(azimuthAngle);
+                    const elRad = THREE.MathUtils.degToRad(elevationAngle);
+                    
+                    const camX = distance * Math.sin(azRad) * Math.cos(elRad);
+                    const camY = distance * Math.sin(elRad) + CENTER.y;
+                    const camZ = distance * Math.cos(azRad) * Math.cos(elRad);
+                    
+                    cameraGroup.position.set(camX, camY, camZ);
+                    cameraGroup.lookAt(CENTER);
+                    
+                    azimuthHandle.position.set(AZIMUTH_RADIUS * Math.sin(azRad), 0.05, AZIMUTH_RADIUS * Math.cos(azRad));
+                    elevationHandle.position.set(-0.8, ELEVATION_RADIUS * Math.sin(elRad) + CENTER.y, ELEVATION_RADIUS * Math.cos(elRad));
+                    
+                    const orangeDist = distance - 0.5;
+                    // 距离手柄固定在正前方，只受仰角和距离影响，不受方位角影响
+                    distanceHandle.position.set(
+                        0,
+                        orangeDist * Math.sin(elRad) + CENTER.y,
+                        orangeDist * Math.cos(elRad)
+                    );
+                    distanceLineGeo.setFromPoints([cameraGroup.position.clone(), CENTER.clone()]);
+                    
+                    // Update prompt
+                    const azSnap = snapToNearest(azimuthAngle, azimuthSteps);
+                    const elSnap = snapToNearest(elevationAngle, elevationSteps);
+                    const distSnap = snapToNearest(distanceFactor, distanceSteps);
+                    const distKey = distSnap === 1 ? '1' : distSnap.toFixed(1);
+                    const prompt = '<sks> ' + azimuthNames[azSnap] + ' ' + elevationNames[String(elSnap)] + ' ' + distanceNames[distKey];
+                    promptOverlay.textContent = prompt;
+                }
+                
+                function updatePropsAndTrigger() {
+                    const azSnap = snapToNearest(azimuthAngle, azimuthSteps);
+                    const elSnap = snapToNearest(elevationAngle, elevationSteps);
+                    const distSnap = snapToNearest(distanceFactor, distanceSteps);
+                    
+                    props.value = { azimuth: azSnap, elevation: elSnap, distance: distSnap };
+                    trigger('change', props.value);
+                }
+                
+                // Raycasting
+                const raycaster = new THREE.Raycaster();
+                const mouse = new THREE.Vector2();
+                let isDragging = false;
+                let dragTarget = null;
+                let dragStartMouse = new THREE.Vector2();
+                let dragStartDistance = 1.0;
+                const intersection = new THREE.Vector3();
+                
+                const canvas = renderer.domElement;
+                
+                canvas.addEventListener('mousedown', (e) => {
+                    const rect = canvas.getBoundingClientRect();
+                    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+                    
+                    raycaster.setFromCamera(mouse, camera);
+                    const intersects = raycaster.intersectObjects([azimuthHandle, elevationHandle, distanceHandle]);
+                    
+                    if (intersects.length > 0) {
+                        isDragging = true;
+                        dragTarget = intersects[0].object;
+                        dragTarget.material.emissiveIntensity = 1.0;
+                        dragTarget.scale.setScalar(1.3);
+                        dragStartMouse.copy(mouse);
+                        dragStartDistance = distanceFactor;
+                        canvas.style.cursor = 'grabbing';
+                    }
+                });
+                
+                canvas.addEventListener('mousemove', (e) => {
+                    const rect = canvas.getBoundingClientRect();
+                    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+                    
+                    if (isDragging && dragTarget) {
+                        raycaster.setFromCamera(mouse, camera);
+                        
+                        if (dragTarget.userData.type === 'azimuth') {
+                            const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.05);
+                            if (raycaster.ray.intersectPlane(plane, intersection)) {
+                                azimuthAngle = THREE.MathUtils.radToDeg(Math.atan2(intersection.x, intersection.z));
+                                if (azimuthAngle < 0) azimuthAngle += 360;
+                            }
+                        } else if (dragTarget.userData.type === 'elevation') {
+                            const plane = new THREE.Plane(new THREE.Vector3(1, 0, 0), -0.8);
+                            if (raycaster.ray.intersectPlane(plane, intersection)) {
+                                const relY = intersection.y - CENTER.y;
+                                const relZ = intersection.z;
+                                elevationAngle = THREE.MathUtils.clamp(THREE.MathUtils.radToDeg(Math.atan2(relY, relZ)), -30, 60);
+                            }
+                        } else if (dragTarget.userData.type === 'distance') {
+                            const deltaY = mouse.y - dragStartMouse.y;
+                            distanceFactor = THREE.MathUtils.clamp(dragStartDistance + deltaY * 1.5, 0.6, 1.4);
+                        }
+                        updatePositions();
+                    } else {
+                        raycaster.setFromCamera(mouse, camera);
+                        const intersects = raycaster.intersectObjects([azimuthHandle, elevationHandle, distanceHandle]);
+                        [azimuthHandle, elevationHandle, distanceHandle].forEach(h => {
+                            h.material.emissiveIntensity = 0.5;
+                            h.scale.setScalar(1);
+                        });
+                        if (intersects.length > 0) {
+                            intersects[0].object.material.emissiveIntensity = 0.8;
+                            intersects[0].object.scale.setScalar(1.1);
+                            canvas.style.cursor = 'grab';
+                        } else {
+                            canvas.style.cursor = 'default';
+                        }
+                    }
+                });
+                
+                const onMouseUp = () => {
+                    if (dragTarget) {
+                        dragTarget.material.emissiveIntensity = 0.5;
+                        dragTarget.scale.setScalar(1);
+                        
+                        // Snap and animate
+                        const targetAz = snapToNearest(azimuthAngle, azimuthSteps);
+                        const targetEl = snapToNearest(elevationAngle, elevationSteps);
+                        const targetDist = snapToNearest(distanceFactor, distanceSteps);
+                        
+                        const startAz = azimuthAngle, startEl = elevationAngle, startDist = distanceFactor;
+                        const startTime = Date.now();
+                        
+                        function animateSnap() {
+                            const t = Math.min((Date.now() - startTime) / 200, 1);
+                            const ease = 1 - Math.pow(1 - t, 3);
+                            
+                            let azDiff = targetAz - startAz;
+                            if (azDiff > 180) azDiff -= 360;
+                            if (azDiff < -180) azDiff += 360;
+                            azimuthAngle = startAz + azDiff * ease;
+                            if (azimuthAngle < 0) azimuthAngle += 360;
+                            if (azimuthAngle >= 360) azimuthAngle -= 360;
+                            
+                            elevationAngle = startEl + (targetEl - startEl) * ease;
+                            distanceFactor = startDist + (targetDist - startDist) * ease;
+                            
+                            updatePositions();
+                            if (t < 1) requestAnimationFrame(animateSnap);
+                            else updatePropsAndTrigger();
+                        }
+                        animateSnap();
+                    }
+                    isDragging = false;
+                    dragTarget = null;
+                    canvas.style.cursor = 'default';
+                };
+                
+                canvas.addEventListener('mouseup', onMouseUp);
+                canvas.addEventListener('mouseleave', onMouseUp);
+                // Touch support for mobile
+                canvas.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    const touch = e.touches[0];
+                    const rect = canvas.getBoundingClientRect();
+                    mouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
+                    
+                    raycaster.setFromCamera(mouse, camera);
+                    const intersects = raycaster.intersectObjects([azimuthHandle, elevationHandle, distanceHandle]);
+                    
+                    if (intersects.length > 0) {
+                        isDragging = true;
+                        dragTarget = intersects[0].object;
+                        dragTarget.material.emissiveIntensity = 1.0;
+                        dragTarget.scale.setScalar(1.3);
+                        dragStartMouse.copy(mouse);
+                        dragStartDistance = distanceFactor;
+                    }
+                }, { passive: false });
+                
+                canvas.addEventListener('touchmove', (e) => {
+                    e.preventDefault();
+                    const touch = e.touches[0];
+                    const rect = canvas.getBoundingClientRect();
+                    mouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
+                    
+                    if (isDragging && dragTarget) {
+                        raycaster.setFromCamera(mouse, camera);
+                        
+                        if (dragTarget.userData.type === 'azimuth') {
+                            const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.05);
+                            if (raycaster.ray.intersectPlane(plane, intersection)) {
+                                azimuthAngle = THREE.MathUtils.radToDeg(Math.atan2(intersection.x, intersection.z));
+                                if (azimuthAngle < 0) azimuthAngle += 360;
+                            }
+                        } else if (dragTarget.userData.type === 'elevation') {
+                            const plane = new THREE.Plane(new THREE.Vector3(1, 0, 0), -0.8);
+                            if (raycaster.ray.intersectPlane(plane, intersection)) {
+                                const relY = intersection.y - CENTER.y;
+                                const relZ = intersection.z;
+                                elevationAngle = THREE.MathUtils.clamp(THREE.MathUtils.radToDeg(Math.atan2(relY, relZ)), -30, 60);
+                            }
+                        } else if (dragTarget.userData.type === 'distance') {
+                            const deltaY = mouse.y - dragStartMouse.y;
+                            distanceFactor = THREE.MathUtils.clamp(dragStartDistance + deltaY * 1.5, 0.6, 1.4);
+                        }
+                        updatePositions();
+                    }
+                }, { passive: false });
+                
+                canvas.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    onMouseUp();
+                }, { passive: false });
+                
+                canvas.addEventListener('touchcancel', (e) => {
+                    e.preventDefault();
+                    onMouseUp();
+                }, { passive: false });
+                
+                // Initial update
+                updatePositions();
+                
+                // Render loop
+                function render() {
+                    requestAnimationFrame(render);
+                    renderer.render(scene, camera);
+                }
+                render();
+                
+                // Handle resize
+                new ResizeObserver(() => {
+                    camera.aspect = wrapper.clientWidth / wrapper.clientHeight;
+                    camera.updateProjectionMatrix();
+                    renderer.setSize(wrapper.clientWidth, wrapper.clientHeight);
+                }).observe(wrapper);
+                
+                // Store update functions for external calls
+                wrapper._updateFromProps = (newVal) => {
+                    if (newVal && typeof newVal === 'object') {
+                        azimuthAngle = newVal.azimuth ?? azimuthAngle;
+                        elevationAngle = newVal.elevation ?? elevationAngle;
+                        distanceFactor = newVal.distance ?? distanceFactor;
+                        updatePositions();
+                    }
+                };
+                
+                wrapper._updateTexture = updateTextureFromUrl;
+                
+                // Watch for prop changes (imageUrl and value)
+                let lastImageUrl = props.imageUrl;
+                let lastValue = JSON.stringify(props.value);
+                setInterval(() => {
+                    // Check imageUrl changes
+                    if (props.imageUrl !== lastImageUrl) {
+                        lastImageUrl = props.imageUrl;
+                        updateTextureFromUrl(props.imageUrl);
+                    }
+                    // Check value changes (from sliders)
+                    const currentValue = JSON.stringify(props.value);
+                    if (currentValue !== lastValue) {
+                        lastValue = currentValue;
+                        if (props.value && typeof props.value === 'object') {
+                            azimuthAngle = props.value.azimuth ?? azimuthAngle;
+                            elevationAngle = props.value.elevation ?? elevationAngle;
+                            distanceFactor = props.value.distance ?? distanceFactor;
+                            updatePositions();
+                        }
+                    }
+                }, 100);
+            };
+            
+            initScene();
+        })();
+        """
+        
+        super().__init__(
+            value=value,
+            html_template=html_template,
+            js_on_load=js_on_load,
+            imageUrl=imageUrl,
+            **kwargs
+        )
+
+
 def stop_generate():
     global stop_generation
     stop_generation = True
@@ -836,6 +1416,44 @@ def generate_editplus2(image_editplus2, image_editplus3, image_editplus4, image_
         )
 
 
+def generate_camera_edit(image_camera, azimuth, elevation, distance, negative_prompt, width, height, num_inference_steps,
+                  batch_images, true_cfg_scale, seed_param, transformer_dropdown,
+                  lora_dropdown, lora_weights, res_vram, additional_prompt=""):
+    """
+    Edit the camera angle of an image using Qwen Image Edit Plus with multi-angles LoRA.
+    """
+    if image_camera is None:
+        raise gr.Error("请先上传图片")
+    
+    # Build camera prompt
+    camera_prompt = build_camera_prompt(azimuth, elevation, distance)
+    
+    # Merge additional prompt if provided
+    if additional_prompt and additional_prompt.strip():
+        camera_prompt = f"{camera_prompt}, {additional_prompt.strip()}"
+    
+    # Convert image to RGB
+    pil_image = image_camera.convert("RGB") if isinstance(image_camera, Image.Image) else Image.open(image_camera).convert("RGB")
+    
+    # Use editplus mode with camera prompt
+    yield from _generate_common(
+        mode="editplus",
+        image=[pil_image],
+        prompt=camera_prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        num_inference_steps=num_inference_steps,
+        batch_images=batch_images,
+        true_cfg_scale=true_cfg_scale,
+        seed_param=seed_param,
+        transformer_dropdown=transformer_dropdown, 
+        lora_dropdown=lora_dropdown,
+        lora_weights=lora_weights,
+        res_vram=res_vram
+    )
+
+
 def generate_cont(image, processor_id):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"outputs/{timestamp}.png"
@@ -1052,10 +1670,12 @@ css = """
     align-items: center !important;
     justify-content: center !important;
 }
+#camera-3d-control { min-height: 450px; }
+.slider-row { display: flex; gap: 10px; align-items: center; }
 """
 
 
-with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]), css=css) as demo:
+with gr.Blocks() as demo:
     gr.Markdown("""
             <div>
                 <h2 style="font-size: 30px;text-align: center;">通臂 Tongbi</h2>
@@ -1091,8 +1711,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
                 with gr.Accordion("参数设置", open=True):
                     gr.Markdown("推荐分辨率：1328x1328、1664x928、1472x1104")
                     with gr.Row():
-                        width = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1328)
-                        height = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
+                        width = gr.Slider(label="宽度", minimum=256, maximum=3072, step=16, value=1328)
+                        height = gr.Slider(label="高度", minimum=256, maximum=3072, step=16, value=1328)
                     with gr.Row():
                         exchange_button = gr.Button("🔄 交换宽高")
                         scale_1_5_button = gr.Button("1.5倍分辨率")
@@ -1124,8 +1744,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
                 with gr.Accordion("参数设置", open=True):
                     gr.Markdown("上传图像后分辨率自动计算")
                     with gr.Row():
-                        width_i2i = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1328)
-                        height_i2i = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
+                        width_i2i = gr.Slider(label="宽度", minimum=256, maximum=3072, step=16, value=1328)
+                        height_i2i = gr.Slider(label="高度", minimum=256, maximum=3072, step=16, value=1328)
                     with gr.Row():
                         exchange_button_i2i = gr.Button("🔄 交换宽高")
                         scale_1_5_button_i2i = gr.Button("1.5倍分辨率")
@@ -1158,8 +1778,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
                 with gr.Accordion("参数设置", open=True):
                     gr.Markdown("上传图像后分辨率自动计算")
                     with gr.Row():
-                        width_inp = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1328)
-                        height_inp = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1328)
+                        width_inp = gr.Slider(label="宽度", minimum=256, maximum=3072, step=16, value=1328)
+                        height_inp = gr.Slider(label="高度", minimum=256, maximum=3072, step=16, value=1328)
                     with gr.Row():
                         exchange_button_inp = gr.Button("🔄 交换宽高")
                         scale_1_5_button_inp = gr.Button("1.5倍分辨率")
@@ -1203,8 +1823,8 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
                 with gr.Accordion("参数设置", open=True):
                     gr.Markdown("上传图像后分辨率自动计算")
                     with gr.Row():
-                        width_editplus2 = gr.Slider(label="宽度", minimum=256, maximum=2656, step=16, value=1024)
-                        height_editplus2 = gr.Slider(label="高度", minimum=256, maximum=2656, step=16, value=1024)
+                        width_editplus2 = gr.Slider(label="宽度", minimum=256, maximum=3072, step=16, value=1024)
+                        height_editplus2 = gr.Slider(label="高度", minimum=256, maximum=3072, step=16, value=1024)
                     with gr.Row():
                         exchange_button_editplus2 = gr.Button("🔄 交换宽高")
                         scale_1_5_button_editplus2 = gr.Button("1.5倍分辨率")
@@ -1222,6 +1842,84 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
                 info_editplus2 = gr.Textbox(label="提示信息", interactive=False)
                 image_output_editplus2 = gr.Gallery(label="生成结果", interactive=False)
                 stop_button_editplus2 = gr.Button("中止生成", variant="stop")
+    with gr.TabItem("3D相机控制"):
+        with gr.Row():
+            # Left column: Input image and controls
+            with gr.Column(scale=1):
+                with gr.Row():
+                    image_camera = gr.Image(label="输入图片", type="pil", height=500)
+                    with gr.Column():
+                        camera_3d = CameraControl3D(
+                            value={"azimuth": 0, "elevation": 0, "distance": 1.0},
+                            elem_id="camera-3d-control"
+                        )
+                        gr.Markdown("*拖动彩色手柄：🟢 方位角，🩷 仰角，🟡 距离（上远下近）*")
+                with gr.Row():
+                    run_btn_camera = gr.Button("🚀 生成", variant="primary", scale=4)
+                    enhance_button_camera = gr.Button("提示词增强", scale=1)
+                    reverse_button_camera = gr.Button("反推提示词", scale=1)
+                    save_example_button_camera = gr.Button("💾", elem_classes="icon-btn")
+                with gr.Accordion("滑块控制", open=True):
+                    azimuth_slider = gr.Slider(
+                        label="方位角（水平旋转）",
+                        minimum=0,
+                        maximum=315,
+                        step=45,
+                        value=0,
+                        info="0°=正面，90°=右侧，180°=背面，270°=左侧"
+                    )
+                    elevation_slider = gr.Slider(
+                        label="仰角（垂直角度）", 
+                        minimum=-30,
+                        maximum=60,
+                        step=30,
+                        value=0,
+                        info="-30°=低角度，0°=平视，60°=高角度"
+                    )
+                    distance_slider = gr.Slider(
+                        label="距离",
+                        minimum=0.6,
+                        maximum=1.4,
+                        step=0.4,
+                        value=1.0,
+                        info="0.6=特写，1.0=中景，1.4=全景"
+                    )
+                    prompt_preview_camera = gr.Textbox(
+                        label="生成的提示词",
+                        value="<sks> front view eye-level shot medium shot",
+                        interactive=False
+                    )
+                    additional_prompt_camera = gr.Textbox(
+                        label="附加提示词",
+                        value="",
+                        placeholder="可在此添加额外的提示词，将自动合并到生成的提示词中",
+                        interactive=True
+                    )
+                    negative_prompt_camera = gr.Textbox(label="负面提示词", value="")
+                with gr.Accordion("参数设置", open=True):
+                    gr.Markdown("上传图像后分辨率自动计算")
+                    with gr.Row():
+                        width_camera = gr.Slider(label="宽度", minimum=256, maximum=3072, step=16, value=1024)
+                        height_camera = gr.Slider(label="高度", minimum=256, maximum=3072, step=16, value=1024)
+                    with gr.Row():
+                        exchange_button_camera = gr.Button("🔄 交换宽高")
+                        scale_1_5_button_camera = gr.Button("1.5倍分辨率")
+                    batch_images_camera = gr.Slider(label="批量生成", minimum=1, maximum=100, step=1, value=1)
+                    num_inference_steps_camera = gr.Slider(label="采样步数（推荐4步）", minimum=1, maximum=100, step=1, value=4)
+                    true_cfg_scale_camera = gr.Slider(label="true cfg scale", minimum=1, maximum=10, step=0.1, value=1.0)
+                    seed_param_camera = gr.Number(label="种子，请输入自然数，-1为随机", value=-1)
+                    examples_dropdown_camera = gr.Dropdown(
+                        label="提示词库", 
+                        choices=load_examples("camera"),
+                        interactive=True,
+                        scale=5
+                    )
+            
+            # Right column: Output
+            with gr.Column(scale=1):
+                info_camera = gr.Textbox(label="提示信息", interactive=False)
+                result_camera = gr.Gallery(label="生成结果", interactive=False)
+                stop_button_camera = gr.Button("中止生成", variant="stop")
     with gr.TabItem("ControlNet预处理"):
         with gr.TabItem("图片预处理"):
             with gr.Row():
@@ -1547,6 +2245,128 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
         inputs=[], 
         outputs=[info_editplus2]
     )
+    # 3D相机控制
+    def update_prompt_from_sliders_camera(azimuth, elevation, distance):
+        """Update prompt preview when sliders change."""
+        prompt = build_camera_prompt(azimuth, elevation, distance)
+        return prompt
+    
+    def sync_3d_to_sliders_camera(camera_value):
+        """Sync 3D control changes to sliders."""
+        if camera_value and isinstance(camera_value, dict):
+            az = camera_value.get('azimuth', 0)
+            el = camera_value.get('elevation', 0)
+            dist = camera_value.get('distance', 1.0)
+            prompt = build_camera_prompt(az, el, dist)
+            return az, el, dist, prompt
+        return gr.update(), gr.update(), gr.update(), gr.update()
+    
+    def sync_sliders_to_3d_camera(azimuth, elevation, distance):
+        """Sync slider changes to 3D control."""
+        return {"azimuth": azimuth, "elevation": elevation, "distance": distance}
+    
+    def update_3d_image_camera(image):
+        """Update the 3D component with the uploaded image."""
+        if image is None:
+            return gr.update(imageUrl=None)
+        # Convert PIL image to base64 data URL
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        data_url = f"data:image/png;base64,{img_str}"
+        return gr.update(imageUrl=data_url)
+    
+    # Slider -> Prompt preview
+    for slider in [azimuth_slider, elevation_slider, distance_slider]:
+        slider.change(
+            fn=update_prompt_from_sliders_camera,
+            inputs=[azimuth_slider, elevation_slider, distance_slider],
+            outputs=[prompt_preview_camera]
+        )
+    
+    # 3D control -> Sliders + Prompt
+    camera_3d.change(
+        fn=sync_3d_to_sliders_camera,
+        inputs=[camera_3d],
+        outputs=[azimuth_slider, elevation_slider, distance_slider, prompt_preview_camera]
+    )
+    
+    # Sliders -> 3D control
+    for slider in [azimuth_slider, elevation_slider, distance_slider]:
+        slider.release(
+            fn=sync_sliders_to_3d_camera,
+            inputs=[azimuth_slider, elevation_slider, distance_slider],
+            outputs=[camera_3d]
+        )
+    
+    # Prompt enhancement and reverse
+    enhance_button_camera.click(
+        fn=enhance_prompt, 
+        inputs=[additional_prompt_camera, image_camera], 
+        outputs=[additional_prompt_camera, info_camera]
+    )
+    reverse_button_camera.click(
+        fn=enhance_prompt, 
+        inputs=[additional_prompt_camera, image_camera], 
+        outputs=[additional_prompt_camera, info_camera]
+    )
+    save_example_button_camera.click(
+        fn=lambda prompt: save_example(prompt, "camera"),
+        inputs=[additional_prompt_camera],
+        outputs=[examples_dropdown_camera, info_camera]
+    )
+    examples_dropdown_camera.change(
+        fn=lambda selected_example, current_prompt: f"{current_prompt} {selected_example.strip()}" if current_prompt else selected_example.strip(),
+        inputs=[examples_dropdown_camera, additional_prompt_camera],
+        outputs=[additional_prompt_camera]
+    )
+    
+    # Generate button
+    run_btn_camera.click(
+        fn=generate_camera_edit,
+        inputs=[image_camera, azimuth_slider, elevation_slider, distance_slider, negative_prompt_camera, 
+                width_camera, height_camera, num_inference_steps_camera, 
+                batch_images_camera, true_cfg_scale_camera, seed_param_camera, transformer_dropdown2, 
+                lora_dropdown, lora_weights, res_vram_tb, additional_prompt_camera],
+        outputs=[result_camera, info_camera]
+    )
+    
+    # Exchange width and height
+    exchange_button_camera.click(
+        fn=exchange_width_height, 
+        inputs=[width_camera, height_camera], 
+        outputs=[width_camera, height_camera, info_camera]
+    )
+    
+    # Scale resolution 1.5x
+    scale_1_5_button_camera.click(
+        fn=scale_resolution_1_5,
+        inputs=[width_camera, height_camera],
+        outputs=[width_camera, height_camera, info_camera]
+    )
+    
+    # Image upload -> update dimensions AND update 3D preview
+    image_camera.upload(
+        fn=update_dimensions_on_upload_camera,
+        inputs=[image_camera],
+        outputs=[width_camera, height_camera, info_camera]
+    ).then(
+        fn=update_3d_image_camera,
+        inputs=[image_camera],
+        outputs=[camera_3d]
+    )
+    
+    # Also handle image clear
+    image_camera.clear(
+        fn=lambda: gr.update(imageUrl=None),
+        outputs=[camera_3d]
+    )
+    
+    stop_button_camera.click(
+        fn=stop_generate, 
+        inputs=[], 
+        outputs=[info_camera]
+    )
     # ControlNet预处理
     generate_button_cont.click(
         fn = generate_cont,
@@ -1655,10 +2475,14 @@ with gr.Blocks(theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]
 
 
 if __name__ == "__main__": 
+    head = '<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>'
     demo.launch(
         server_name=args.server_name, 
         server_port=find_port(args.server_port),
         share=args.share, 
         mcp_server=args.mcp_server,
         inbrowser=True,
+        theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")]), 
+        css=css,
+        head=head,
     )
