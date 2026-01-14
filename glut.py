@@ -310,7 +310,7 @@ def load_model(mode, transformer_dropdown, lora_dropdown, lora_weights, res_vram
         load_lora(lora_dropdown, lora_weights)
         mmgp = offload.all(
             pipe, 
-            pinnedMemory = ["text_encoder", "transformer"] if mem.total/1073741824 > 127 else "transformer",
+            pinnedMemory = ["text_encoder", "transformer"] if mem.total/1073741824 > 60 else "transformer",
             budgets={'*': budgets}, 
             extraModelsToQuantize = ["text_encoder"],
             #quantizeTransformer = False,
